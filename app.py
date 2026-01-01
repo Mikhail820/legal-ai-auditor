@@ -6,28 +6,34 @@ from docx import Document
 # 1. Настройка страницы
 st.set_page_config(page_title="LegalAI Auditor", page_icon="⚖️")
 
-# 2. Инициализация модели с полным путем (исправляет ошибку 404)
+# 2. Инициализация модели (Gemini 2.0 Flash)
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Мы используем полный путь 'models/gemini-1.5-flash'
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    # Переключаемся на самую свежую модель 2.0
+    model = genai.GenerativeModel('gemini-2.0-flash-exp') 
 else:
-    st.error("Ключ API не найден в Secrets!")
+    st.error("Ключ API не найден!")
     st.stop()
 
 # 3. Интерфейс
 st.title("⚖️ Юрист-Аудитор 2026")
-st.write("Проверьте любой договор на наличие скрытых ловушек.")
 
-cat = st.selectbox("Категория договора:", ["Кредиты", "Туризм", "Аренда", "Труд", "Другое"])
-file = st.file_uploader("Загрузите файл (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
+# Добавили Банковские договоры в начало списка
+cat = st.selectbox("Категория договора:", [
+    "Банковское обслуживание (карты, вклады)", 
+    "Кредиты и ипотека", 
+    "Аренда недвижимости",
+    "Трудовой договор",
+    "Образование (курсы)",
+    "Другое"
+])
+
+file = st.file_uploader("Загрузите договор (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
 txt = st.text_area("Или вставьте текст вручную:")
 
-# 4. Логика работы
+# 4. Логика
 if st.button("Проверить на риски"):
     content = ""
-    
-    # Извлечение текста
     if file:
         try:
             if file.type == "application/pdf":
@@ -39,20 +45,24 @@ if st.button("Проверить на риски"):
             else:
                 content = file.read().decode("utf-8")
         except Exception as e:
-            st.error(f"Не удалось прочитать файл: {e}")
+            st.error(f"Ошибка чтения файла: {e}")
     else:
         content = txt
 
-    # Отправка в ИИ
     if content:
-        with st.spinner("ИИ анализирует документ..."):
+        with st.spinner("ИИ 2.0 анализирует документ..."):
             try:
-                prompt = f"Ты опытный юрист. Категория: {cat}. Найди 3-5 главных юридических рисков в этом тексте и объясни их: {content}"
+                prompt = f"Ты старший юрист. Категория: {cat}. Найди 5 самых опасных ловушек в этом тексте и объясни, почему это плохо для клиента: {content}"
                 res = model.generate_content(prompt)
-                st.success("Анализ готов!")
+                st.success("Анализ завершен!")
                 st.markdown(res.text)
             except Exception as e:
-                st.error(f"Ошибка ИИ: {e}")
-                st.info("Попробуйте перезагрузить страницу или проверить лимиты API.")
+                st.error(f"Ошибка модели 2.0: {e}")
+                # Если 2.0 не сработает, пробуем проверенную 1.5 Pro
+                st.info("Пробую запасную модель...")
+                model_alt = genai.GenerativeModel('gemini-1.5-pro')
+                res = model_alt.generate_content(prompt)
+                st.markdown(res.text)
     else:
-        st.warning("Пожалуйста, предоставьте текст или файл для анализа.")
+        st.warning("Пожалуйста, предоставьте текст.")
+        
