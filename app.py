@@ -7,33 +7,70 @@ from PIL import Image
 # 1. Настройка страницы
 st.set_page_config(page_title="LegalAI Auditor", page_icon="⚖️", layout="wide")
 
-# 2. Проверка ключа
-if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("❌ Ошибка: Ключ API не найден. Проверьте настройки Secrets.")
-    st.stop()
-
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-
-# 3. Функция выбора модели (с авто-починкой)
-def get_model():
-    try:
-        # Пробуем самую быструю и новую модель
+# 2. Подключение API ключа
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        # Используем стандартную модель, она самая надежная
         model = genai.GenerativeModel('gemini-1.5-flash')
-        return model
-    except Exception as e:
-        st.error(f"Ошибка инициализации модели: {e}")
-        return None
+    else:
+        st.error("❌ Ключ API не найден. Проверьте Secrets.")
+        st.stop()
+except Exception as e:
+    st.error(f"Ошибка настройки API: {e}")
 
-model = get_model()
-
-# 4. Интерфейс
-st.title("⚖️ LegalAI: Проверка договоров")
+# 3. Интерфейс
+st.title("⚖️ ИИ-Юрист: Проверка договоров")
 st.markdown("---")
 
 col1, col2 = st.columns([1, 2])
 
 with col1:
     st.subheader("Настройки")
+    category = st.selectbox("Ниша:", ["Туризм", "Кредиты/Займы", "Аренда", "Услуги", "Общее"])
+    uploaded_file = st.file_uploader("Файл", type=["pdf", "docx", "txt", "jpg", "png"])
+    user_text = st.text_area("Или текст:", height=150)
+
+with col2:
+    st.subheader("Анализ")
+    content = ""
+    
+    # Обработка файла
+    if uploaded_file:
+        try:
+            if uploaded_file.type == "application/pdf":
+                reader = PdfReader(uploaded_file)
+                content = "".join([page.extract_text() for page in reader.pages])
+            elif "word" in uploaded_file.type:
+                doc = Document(uploaded_file)
+                content = "\n".join([p.text for p in doc.paragraphs])
+            elif "image" in uploaded_file.type:
+                image = Image.open(uploaded_file)
+                st.image(image, width=200)
+                if st.button("📷 Распознать текст"):
+                    res = model.generate_content(["Прочитай документ:", image])
+                    content = res.text
+            else:
+                content = uploaded_file.read().decode("utf-8")
+        except Exception as e:
+            st.error(f"Ошибка чтения файла: {e}")
+
+    if user_text:
+        content = user_text
+
+    # Кнопка запуска
+    if st.button("🚀 Проверить риски"):
+        if not content:
+            st.warning("Сначала загрузите договор!")
+        else:
+            with st.spinner("Изучаю документ..."):
+                try:
+                    prompt = f"Ты юрист. Ниша: {category}. Найди 3 главных риска и объясни их простым языком. Текст: {content}"
+                    response = model.generate_content(prompt)
+                    st.success("Готово!")
+                    st.markdown(response.text)
+                except Exception as e:
+                    st.error(f"Ошибка при анализе: {e}")
     category = st.selectbox("Тип договора:", ["Туризм", "Займы/Кредиты", "Аренда", "Услуги", "Другое"])
     uploaded_file = st.file_uploader("Файл (PDF, DOCX, Фото)", type=["pdf", "docx", "jpg", "png", "txt"])
     user_text = st.text_area("Или текст:", height=150)
