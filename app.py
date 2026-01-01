@@ -3,19 +3,15 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
 
-# 1. Настройка
 st.set_page_config(page_title="LegalAI Auditor", page_icon="⚖️")
 
-# 2. Инициализация (используем Gemini 3 Flash как основную)
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Исправленный путь к модели
     model = genai.GenerativeModel('models/gemini-3-flash')
 else:
     st.error("Ключ API не найден!")
     st.stop()
 
-# 3. Интерфейс
 st.title("⚖️ Юрист-Аудитор 2026")
 
 cat = st.selectbox("Категория договора:", [
@@ -29,39 +25,38 @@ cat = st.selectbox("Категория договора:", [
 file = st.file_uploader("Загрузите файл", type=["pdf", "docx", "txt"])
 txt = st.text_area("Или вставьте текст:")
 
-# 4. Анализ
 if st.button("🚀 Начать проверку"):
     content = ""
     if file:
         try:
-            if file.type == "application/pdf":
+            if file.name.endswith(".pdf"):
                 reader = PdfReader(file)
                 content = "".join([p.extract_text() for p in reader.pages])
-            elif "word" in file.type:
+            elif file.name.endswith(".docx"):
                 doc = Document(file)
                 content = "\n".join([p.text for p in doc.paragraphs])
             else:
                 content = file.read().decode("utf-8")
-        except:
-            st.error("Ошибка при чтении файла")
+        except Exception as e:
+            st.error(f"Ошибка чтения: {e}")
     else:
         content = txt
 
     if content:
-        with st.spinner("Gemini 3 анализирует..."):
+        with st.spinner("Анализирую (это может занять до 30 сек)..."):
             try:
-                prompt = f"Ты опытный юрист. Категория: {cat}. Найди 5 рисков в этом тексте: {content}"
+                # Промпт для качественного ответа
+                prompt = f"Ты эксперт-юрист. Категория: {cat}. Найди 5 рисков для клиента в этом тексте и предложи исправления: {content}"
                 res = model.generate_content(prompt)
                 st.success("Готово!")
                 st.markdown(res.text)
             except Exception as e:
-                # Если 429 или 404, пробуем Gemini 1.5 Flash (она самая "живучая")
-                st.warning("Основная модель занята, подключаю резерв...")
+                st.warning("Перегрузка. Пробую резерв...")
                 try:
-                    alt_model = genai.GenerativeModel('models/gemini-1.5-flash')
-                    res = alt_model.generate_content(prompt)
+                    # Запасной вариант - проверенная временем 1.5 Flash
+                    res = genai.GenerativeModel('models/gemini-1.5-flash').generate_content(prompt)
                     st.markdown(res.text)
                 except Exception as e2:
-                    st.error(f"Все модели заняты. Подождите 1 минуту. Ошибка: {e2}")
+                    st.error("Превышен лимит запросов. Подождите 1 минуту.")
     else:
-        st.warning("Добавьте текст!")
+        st.warning("Текст не найден!")
