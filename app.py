@@ -126,7 +126,6 @@ with col2:
                         st.write("Доступные вам модели:", models)
                     except:
                         st.write("Не удалось получить список моделей.")
-    )
     
     uploaded_file = st.file_uploader("Загрузите файл (PDF, DOCX, JPG, PNG)", type=["pdf", "docx", "jpg", "png", "txt"])
     user_text = st.text_area("Или вставьте текст вручную:", height=200)
