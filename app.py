@@ -3,26 +3,31 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
 
-# 1. Настройка
-st.set_page_config(page_title="LegalAI")
+# 1. Настройка страницы
+st.set_page_config(page_title="LegalAI Auditor", page_icon="⚖️")
 
-# 2. API Ключ
+# 2. Инициализация модели с полным путем (исправляет ошибку 404)
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Мы используем полный путь 'models/gemini-1.5-flash'
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
 else:
-    st.error("Ключ не найден!")
+    st.error("Ключ API не найден в Secrets!")
     st.stop()
 
-# 3. Дизайн
+# 3. Интерфейс
 st.title("⚖️ Юрист-Аудитор 2026")
-cat = st.selectbox("Тип:", ["Кредиты", "Туризм", "Аренда", "Труд", "Другое"])
-file = st.file_uploader("Файл (PDF/DOCX)", type=["pdf", "docx", "txt"])
-txt = st.text_area("Или текст:")
+st.write("Проверьте любой договор на наличие скрытых ловушек.")
 
-# 4. Логика
-if st.button("Проверить"):
+cat = st.selectbox("Категория договора:", ["Кредиты", "Туризм", "Аренда", "Труд", "Другое"])
+file = st.file_uploader("Загрузите файл (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
+txt = st.text_area("Или вставьте текст вручную:")
+
+# 4. Логика работы
+if st.button("Проверить на риски"):
     content = ""
+    
+    # Извлечение текста
     if file:
         try:
             if file.type == "application/pdf":
@@ -32,19 +37,22 @@ if st.button("Проверить"):
                 doc = Document(file)
                 content = "\n".join([p.text for p in doc.paragraphs])
             else:
-                content = file.read().decode()
-        except:
-            st.error("Ошибка чтения файла")
+                content = file.read().decode("utf-8")
+        except Exception as e:
+            st.error(f"Не удалось прочитать файл: {e}")
     else:
         content = txt
 
+    # Отправка в ИИ
     if content:
-        with st.spinner("Думаю..."):
+        with st.spinner("ИИ анализирует документ..."):
             try:
-                prompt = f"Ты юрист. Категория: {cat}. Найди риски: {content}"
+                prompt = f"Ты опытный юрист. Категория: {cat}. Найди 3-5 главных юридических рисков в этом тексте и объясни их: {content}"
                 res = model.generate_content(prompt)
+                st.success("Анализ готов!")
                 st.markdown(res.text)
             except Exception as e:
-                st.error(f"Ошибка: {e}")
+                st.error(f"Ошибка ИИ: {e}")
+                st.info("Попробуйте перезагрузить страницу или проверить лимиты API.")
     else:
-        st.warning("Пусто!")
+        st.warning("Пожалуйста, предоставьте текст или файл для анализа.")
