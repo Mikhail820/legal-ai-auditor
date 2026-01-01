@@ -4,36 +4,91 @@ from PyPDF2 import PdfReader
 from docx import Document
 from PIL import Image
 
-# 1. Настройка стиля
+# 1. Настройка страницы
 st.set_page_config(page_title="LegalAI Auditor", page_icon="⚖️", layout="wide")
 
-st.markdown("""
-    <style>
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #004a99; color: white; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# 2. Инициализация ИИ (с исправленной моделью)
-if "GOOGLE_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Добавили -latest для исправления ошибки NotFound
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-else:
-    st.error("Ключ API не найден в настройках Streamlit!")
+# 2. Проверка ключа
+if "GOOGLE_API_KEY" not in st.secrets:
+    st.error("❌ Ошибка: Ключ API не найден. Проверьте настройки Secrets.")
     st.stop()
 
-# 3. Шапка
-st.title("⚖️ LegalAI: Ваш персональный ИИ-юрист")
-st.info("Загрузите договор, выберите нишу и получите мгновенный аудит рисков.")
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+
+# 3. Функция выбора модели (с авто-починкой)
+def get_model():
+    try:
+        # Пробуем самую быструю и новую модель
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        return model
+    except Exception as e:
+        st.error(f"Ошибка инициализации модели: {e}")
+        return None
+
+model = get_model()
 
 # 4. Интерфейс
+st.title("⚖️ LegalAI: Проверка договоров")
+st.markdown("---")
+
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.markdown("### 🛠 Настройки")
-    category = st.selectbox(
-        "Тип договора:",
-        ["Туризм", "Образование", "Недвижимость", "Труд", "Медицина", "Авто", "IT", "Общий"]
+    st.subheader("Настройки")
+    category = st.selectbox("Тип договора:", ["Туризм", "Займы/Кредиты", "Аренда", "Услуги", "Другое"])
+    uploaded_file = st.file_uploader("Файл (PDF, DOCX, Фото)", type=["pdf", "docx", "jpg", "png", "txt"])
+    user_text = st.text_area("Или текст:", height=150)
+
+with col2:
+    st.subheader("Результат")
+    content = ""
+    
+    # Обработка файлов
+    if uploaded_file:
+        try:
+            if uploaded_file.type == "application/pdf":
+                reader = PdfReader(uploaded_file)
+                content = "".join([page.extract_text() for page in reader.pages])
+            elif "word" in uploaded_file.type:
+                doc = Document(uploaded_file)
+                content = "\n".join([p.text for p in doc.paragraphs])
+            elif "image" in uploaded_file.type:
+                image = Image.open(uploaded_file)
+                st.image(image, width=200)
+                if st.button("🔍 Распознать текст с фото"):
+                    res = model.generate_content(["Прочитай этот документ:", image])
+                    content = res.text
+                    st.write("Текст распознан!")
+            else:
+                content = uploaded_file.read().decode("utf-8")
+        except Exception as e:
+            st.error(f"Ошибка чтения файла: {e}")
+
+    # Если ввели текст вручную
+    if user_text:
+        content = user_text
+
+    # Кнопка запуска
+    if st.button("🚀 Найти риски"):
+        if not content:
+            st.warning("Сначала загрузите договор!")
+        else:
+            with st.spinner("Юрист читает документ..."):
+                try:
+                    # Прямой вызов модели
+                    prompt = f"Ты опытный юрист. Ниша: {category}. Найди 5 опасных мест в тексте: {content}"
+                    response = model.generate_content(prompt)
+                    st.success("Готово!")
+                    st.markdown(response.text)
+                except Exception as e:
+                    # ВАЖНО: Если ошибка, выводим подробности для отладки
+                    st.error("⚠️ Произошла ошибка при анализе.")
+                    st.code(str(e))
+                    st.write("Попробуем получить список доступных моделей...")
+                    try:
+                        models = [m.name for m in genai.list_models()]
+                        st.write("Доступные вам модели:", models)
+                    except:
+                        st.write("Не удалось получить список моделей.")
     )
     
     uploaded_file = st.file_uploader("Загрузите файл (PDF, DOCX, JPG, PNG)", type=["pdf", "docx", "jpg", "png", "txt"])
