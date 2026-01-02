@@ -6,120 +6,125 @@ import io
 from PIL import Image
 import re
 
-# --- КОНФИГУРАЦИЯ СТРАНИЦЫ ---
-st.set_page_config(page_title="LegalAI Pro - Инструменты", page_icon="⚖️", layout="wide")
+# --- 1. НАСТРОЙКИ СТРАНИЦЫ И БЕЗОПАСНОСТЬ ---
+st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
 
-# --- ПОДКЛЮЧЕНИЕ К ИИ ---
+# Дисклеймер в самом верху (неизменный)
+st.error("⚠️ ВНИМАНИЕ: Данный инструмент использует ИИ. Результаты не являются юридической консультацией. Проверяйте отчеты у квалифицированных юристов.")
+
+# --- 2. ПОДКЛЮЧЕНИЕ К ИИ ---
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Используем модель Flash для скорости и экономии токенов
     model = genai.GenerativeModel('models/gemini-1.5-flash')
 else:
-    st.error("Ошибка: GOOGLE_API_KEY не найден в Secrets!")
+    st.error("Критическая ошибка: API ключ не найден в Secrets!")
     st.stop()
 
-# --- ФУНКЦИИ-ПОМОЩНИКИ ---
+# --- 3. ТЕХНИЧЕСКИЕ ФУНКЦИИ ---
 def extract_text(file):
-    """Извлекает текст из PDF, DOCX и TXT"""
     try:
         if file.name.endswith(".pdf"):
             return "".join([p.extract_text() for p in PdfReader(file).pages])
         elif file.name.endswith(".docx"):
             return "\n".join([p.text for p in Document(file).paragraphs])
         return file.read().decode('utf-8', errors='ignore')
-    except Exception as e:
-        return f"Ошибка при чтении файла: {e}"
+    except: return "Ошибка чтения файла."
 
-def create_docx(text, title="ЮРИДИЧЕСКИЙ ДОКУМЕНТ"):
-    """Создает Word-файл из текста"""
+def create_docx_pro(report_text, title="ОТЧЕТ LEGALAI"):
     doc = Document()
+    doc.add_paragraph("ВАЖНО: Документ подготовлен ИИ. Требуется проверка юристом.").bold = True
     doc.add_heading(title, 0)
-    for line in text.split('\n'):
-        if line.strip():
-            doc.add_paragraph(line)
+    
+    # Логика сохранения таблиц в Word
+    table_rows = []
+    for line in report_text.split('\n'):
+        if line.strip().startswith('|') and line.strip().endswith('|'):
+            if re.match(r'^[ \d\.\-\|:]+$', line): continue
+            cells = [c.strip() for c in line.split('|') if c.strip()]
+            if cells: table_rows.append(cells)
+        else:
+            if table_rows:
+                table = doc.add_table(rows=0, cols=max(len(r) for r in table_rows))
+                table.style = 'Table Grid'
+                for r_data in table_rows:
+                    row_cells = table.add_row().cells
+                    for i, val in enumerate(r_data):
+                        if i < len(row_cells): row_cells[i].text = val
+                table_rows = []
+            if line.strip(): doc.add_paragraph(line)
+            
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
     return buf
 
-# --- ИНТЕРФЕЙС ---
-st.title("⚖️ LegalAI Pro: Анализ и Коммуникации")
-st.caption("Универсальный помощник для работы с договорами и претензиями")
+# --- 4. ИНТЕРФЕЙС ---
+st.sidebar.title("Настройки")
+depth = st.sidebar.select_slider("Глубина анализа:", options=["Базовая", "Стандартная", "Глубокая"], value="Глубокая")
 
-# Сайдбар с настройками
-with st.sidebar:
-    st.header("Настройки ИИ")
-    depth = st.select_slider("Глубина проработки:", options=["Базовая", "Стандарт", "Эксперт"], value="Стандарт")
-    st.divider()
-    st.info("Без авторизации: Доступны все функции")
+tab1, tab2, tab3 = st.tabs(["🚀 АНАЛИЗ", "🔍 СРАВНЕНИЕ", "✉️ ГЕНЕРАТОР ОТВЕТА"])
 
-# Создание вкладок
-tab1, tab2, tab3 = st.tabs(["🔍 АНАЛИЗ ДОКУМЕНТА", "🔄 СРАВНЕНИЕ ВЕРСИЙ", "✉️ ГЕНЕРАТОР ОТВЕТА"])
-
-# --- ВКЛАДКА 1: АНАЛИЗ ---
+# --- ВКЛАДКА 1: ПОЛНЫЙ АНАЛИЗ (Вернул всё как было) ---
 with tab1:
-    st.subheader("Поиск рисков и аудит")
-    up_file = st.file_uploader("Загрузите файл или фото договора", type=['pdf','docx','jpg','png','jpeg'], key="anal_up")
+    st.subheader("Юридический аудит документа")
+    u_file = st.file_uploader("Загрузите договор (PDF, DOCX или ФОТО)", type=['pdf','docx','jpg','png','jpeg'], key="anal")
     
-    if st.button("🚀 Начать анализ", use_container_width=True):
-        if up_file:
-            with st.spinner("ИИ изучает документ..."):
-                # Проверка: фото или текст
-                content = Image.open(up_file) if up_file.type.startswith('image') else extract_text(up_file)
+    if st.button("🚀 ЗАПУСТИТЬ ПОЛНУЮ ПРОВЕРКУ", use_container_width=True, type="primary"):
+        if u_file:
+            with st.spinner("Идет глубокий юридический анализ..."):
+                content = Image.open(u_file) if u_file.type.startswith('image') else extract_text(u_file)
                 
-                prompt = f"""Ты опытный юрист. Проведи анализ документа. Глубина: {depth}.
-                1. Оцени общую безопасность.
-                2. Составь таблицу: | Пункт | Риск | Рекомендация |.
-                3. Напиши краткий вердикт: подписывать или нет."""
+                # Тот самый мощный промпт, который мы настраивали
+                sys_prompt = f"""ТЫ ВЕДУЩИЙ ЮРИСТ. Проведи анализ с глубиной: {depth}.
+                ОБЯЗАТЕЛЬНО соблюдай структуру:
+                1. Jurisdiction: Определи применимое право.
+                2. Verdict: Насколько опасно подписывать (в %).
+                3. Risk Table: Составь таблицу | Пункт | Риск | Рекомендация правки |.
+                4. Key Findings: Самые критичные моменты.
+                Используй ссылки на статьи закона (ГК РФ и др.)."""
                 
-                # Запрос к Gemini
-                response = model.generate_content([prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{prompt}\n\n{content}")
-                st.session_state.analysis_res = response.text
-        else:
-            st.warning("Сначала загрузите файл")
+                res = model.generate_content([sys_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{sys_prompt}\n\n{content}")
+                st.session_state.full_report = res.text
 
-    if 'analysis_res' in st.session_state:
-        st.markdown(st.session_state.analysis_res)
-        st.download_button("📥 Скачать анализ в Word", data=create_docx(st.session_state.analysis_res), file_name="Legal_Analysis.docx")
+    if 'full_report' in st.session_state:
+        st.markdown(st.session_state.full_report)
+        st.download_button("📥 СКАЧАТЬ ПОЛНЫЙ ОТЧЕТ", data=create_docx_pro(st.session_state.full_report), file_name="Legal_Report.docx")
 
 # --- ВКЛАДКА 2: СРАВНЕНИЕ ---
 with tab2:
-    st.subheader("Что изменилось в новой версии?")
-    c1, c2 = st.columns(2)
-    file_old = c1.file_uploader("Оригинал (DOCX/PDF)", type=['pdf','docx'], key="old")
-    file_new = c2.file_uploader("Версия от контрагента", type=['pdf','docx'], key="new")
+    st.subheader("Сравнение двух редакций")
+    col1, col2 = st.columns(2)
+    old_f = col1.file_uploader("Ваша версия", type=['pdf','docx'])
+    new_f = col2.file_uploader("Версия контрагента", type=['pdf','docx'])
     
-    if st.button("⚖️ Сравнить и найти отличия", use_container_width=True):
-        if file_old and file_new:
+    if st.button("⚖️ НАЙТИ ОТЛИЧИЯ"):
+        if old_f and new_f:
             with st.spinner("Сравниваю тексты..."):
-                t_old, t_new = extract_text(file_old), extract_text(file_new)
-                diff_prompt = "Сравни два текста договора. Выдели только существенные изменения (цены, сроки, штрафы, подсудность). Оформи в виде таблицы: Старая версия | Новая версия | В чем риск."
-                res = model.generate_content(f"{diff_prompt}\n\nОригинал: {t_old[:15000]}\n\nНовый: {t_new[:15000]}")
-                st.session_state.diff_res = res.text
+                t1, t2 = extract_text(old_f), extract_text(new_f)
+                res = model.generate_content(f"Найди отличия между текстами. Составь таблицу изменений и оцени их риск для нас.\n\nТекст 1: {t1[:10000]}\n\nТекст 2: {t2[:10000]}")
+                st.session_state.diff_report = res.text
 
-    if 'diff_res' in st.session_state:
-        st.markdown(st.session_state.diff_res)
+    if 'diff_report' in st.session_state:
+        st.markdown(st.session_state.diff_report)
 
-# --- ВКЛАДКА 3: ГЕНЕРАТОР ОТВЕТА ---
+# --- ВКЛАДКА 3: ГЕНЕРАТОР ОТВЕТА (Новое дополнение) ---
 with tab3:
-    st.subheader("Написание официального письма")
-    st.write("ИИ составит текст письма на основе документа и вашей позиции.")
+    st.subheader("Генератор официального письма")
+    doc_in = st.file_uploader("Загрузите документ контрагента для ответа", type=['pdf','docx','jpg','png'], key="gen")
+    user_goal = st.text_area("Что вы хотите получить в итоге? (Например: отказ от штрафа, снижение цены)", placeholder="Опишите ваши требования...")
     
-    doc_in = st.file_uploader("Загрузите документ, на который нужно ответить", type=['pdf','docx','jpg','png'], key="gen_up")
-    user_wish = st.text_area("Ваши пожелания к ответу:", placeholder="Например: Согласиться на сроки, но потребовать убрать пункт о предоплате.")
-    
-    if st.button("✍️ Создать текст ответа", use_container_width=True):
+    if st.button("✍️ СОСТАВИТЬ ПИСЬМО"):
         if doc_in:
-            with st.spinner("Пишу письмо..."):
+            with st.spinner("Составляю текст письма..."):
                 content = Image.open(doc_in) if doc_in.type.startswith('image') else extract_text(doc_in)
-                reply_prompt = f"""Ты юридический консультант. Напиши официальный ответ контрагенту на основе этого документа.
-                Моя позиция: {user_wish if user_wish else "Вежливо обсудить условия и защитить мои интересы"}.
-                Стиль: Официально-деловой. Обязательно добавь ссылки на ГК РФ. Сделай структуру: Шапка, Суть, Предложение, Подпись."""
+                reply_prompt = f"""Напиши профессиональный официальный ответ на этот документ. 
+                Пожелания заказчика: {user_goal}. Стиль: Официально-деловой, твердый, но корректный. 
+                Используй юридическую аргументацию. Оформи как готовое письмо."""
                 
                 response = model.generate_content([reply_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{reply_prompt}\n\n{content}")
-                st.session_state.reply_res = response.text
+                st.session_state.reply_final = response.text
 
-    if 'reply_res' in st.session_state:
-        st.markdown("---")
-        st.markdown(st.session_state.reply_res)
-        st.download_button("📥 Скачать готовое письмо", data=create_docx(st.session_state.reply_res, "ОФИЦИАЛЬНОЕ ПИСЬМО"), file_name="Letter_Reply.docx")
+    if 'reply_final' in st.session_state:
+        st.markdown(st.session_state.reply_final)
+        st.download_button("📥 СКАЧАТЬ ГОТОВОЕ ПИСЬМО", data=create_docx_pro(st.session_state.reply_final, "ОФИЦИАЛЬНОЕ ПИСЬМО"), file_name="Official_Letter.docx")
+    
