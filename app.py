@@ -7,210 +7,201 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 from PIL import Image
 
-# --- 1. CONFIGURATION & UI STYLES ---
-st.set_page_config(page_title="LegalAI Universal Enterprise", page_icon="⚖️", layout="wide")
+# --- 1. НАСТРОЙКИ И ДИЗАЙН ---
+st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
 
-# Профессиональный дизайн интерфейса
 st.markdown("""
 <style>
-    .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #e9ecef; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #004e98; color: white; }
-    .stButton>button:hover { background-color: #003366; color: white; border: none; }
-    footer {visibility: hidden;}
+    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 1px solid #f0f2f6; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 3.5em; background-color: #1a237e; color: white; font-weight: bold; transition: 0.3s; }
+    .stButton>button:hover { background-color: #0d47a1; border: none; }
+    .main { background-color: #fcfcfc; }
 </style>
 """, unsafe_allow_html=True)
 
-# Инициализация ИИ (Gemini 2.5 Flash)
+# Инициализация ИИ
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Temperature 0.1 для исключения "фантазий" ИИ
-    model = genai.GenerativeModel('models/gemini-2.5-flash', generation_config={"temperature": 0.1}) 
+    # Temperature 0.0 для максимальной юридической строгости
+    model = genai.GenerativeModel('models/gemini-2.5-flash', generation_config={"temperature": 0.0}) 
 else:
-    st.error("🚨 Ключ Google API не найден в Secrets!")
+    st.error("🚨 Ключ API не найден. Добавьте GOOGLE_API_KEY в Settings > Secrets.")
     st.stop()
 
-# --- 2. CORE BUSINESS LOGIC ---
+# --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def read_txt_safe(file):
-    """Чтение TXT с автоматическим определением кодировки"""
-    raw_data = file.read()
-    for encoding in ['utf-8', 'windows-1251', 'cp1251', 'latin-1']:
-        try:
-            return raw_data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return "Error: Encoding mismatch."
+    raw = file.read()
+    for enc in ['utf-8', 'windows-1251', 'cp1251']:
+        try: return raw.decode(enc)
+    except: continue
+    return "Error: Encoding fail."
 
 def extract_text(file):
-    """Универсальный извлекатель текста из PDF, DOCX, TXT"""
     try:
         if file.name.endswith(".pdf"):
-            reader = PdfReader(file)
-            return "".join([p.extract_text() for p in reader.pages])
+            return "".join([p.extract_text() for p in PdfReader(file).pages])
         elif file.name.endswith(".docx"):
-            doc = Document(file)
-            return "\n".join([p.text for p in doc.paragraphs])
+            return "\n".join([p.text for p in Document(file).paragraphs])
         elif file.name.endswith(".txt"):
             return read_txt_safe(file)
-        return "Unsupported format."
     except Exception as e:
-        return f"Extraction Error: {e}"
+        return f"Ошибка чтения: {e}"
 
 def create_pro_docx(report_text):
-    """Генерация юридически чистого Word-файла с таблицами"""
     doc = Document()
-    style = doc.styles['Normal']
-    style.font.name = 'Arial'
-    style.font.size = Pt(11)
+    doc.styles['Normal'].font.name = 'Arial'
+    doc.styles['Normal'].font.size = Pt(11)
     
-    # Заголовок отчета
-    title = doc.add_heading('Юридическое заключение / Legal Opinion', 0)
+    title = doc.add_heading('Юридическое заключение / Legal Audit Report', 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     clean_text = report_text.replace('**', '').replace('###', '').replace('`', '')
     lines = clean_text.split('\n')
     
     table_buffer = []
-    
     for line in lines:
         stripped = line.strip()
-        # Детекция строк таблицы, игнорируя Markdown-разделители (|---|)
         if '|' in stripped and set(stripped.replace('|', '').replace(' ', '')) != {'-'}:
-            row_cells = [c.strip() for c in stripped.split('|') if c.strip()]
-            if row_cells: table_buffer.append(row_cells)
+            row = [c.strip() for c in stripped.split('|') if c.strip()]
+            if row: table_buffer.append(row)
         else:
             if table_buffer:
-                num_cols = max(len(r) for r in table_buffer)
-                w_table = doc.add_table(rows=0, cols=num_cols)
-                w_table.style = 'Table Grid'
+                table = doc.add_table(rows=0, cols=max(len(r) for r in table_buffer))
+                table.style = 'Table Grid'
                 for r_idx, r_data in enumerate(table_buffer):
-                    row_cells = w_table.add_row().cells
+                    cells = table.add_row().cells
                     for c_idx, val in enumerate(r_data):
-                        if c_idx < num_cols:
-                            run = row_cells[c_idx].paragraphs[0].add_run(val)
-                            if r_idx == 0: run.font.bold = True # Заголовок таблицы жирным
+                        if c_idx < len(cells):
+                            run = cells[c_idx].paragraphs[0].add_run(val)
+                            if r_idx == 0: run.font.bold = True
                 table_buffer = []
-            
             if stripped and not set(stripped.replace('|', '').replace(' ', '')) == {'-'}:
                 p = doc.add_paragraph(stripped)
                 if len(stripped) < 60 and (stripped.isupper() or stripped.endswith(':')):
                     p.runs[0].font.bold = True
-
+    
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-# --- 3. UI LAYOUT ---
+# --- 3. ИНТЕРФЕЙС ---
 
-# Sidebar (Боковая панель)
 with st.sidebar:
-    st.title("⚙️ LegalAI Config")
-    st.write("**Mode:** International / Critical Focus")
-    st.write("**AI Model:** Gemini 2.5 Flash")
+    st.title("🛡️ Контроль качества")
+    st.write("**Режим:** Анализ критических рисков")
+    st.write("**Международный охват:** Включен")
     st.divider()
-    st.markdown("⚠️ **Отказ от ответственности:**\nДанный отчет сформирован ИИ и не является официальной юридической консультацией.")
+    st.markdown("""
+    **Шкала оценки:**
+    🟢 - Стандартные условия
+    🟡 - Нужны точечные правки
+    🔴 - Кабальные условия / Риск потери прав
+    """)
 
-# Main Screen
-st.title("⚖️ LegalAI Universal Enterprise")
-st.markdown("##### Платформа автоматического аудита международных и локальных документов")
+st.title("⚖️ LegalAI International Enterprise")
+st.write("Профессиональный аудит документов с фокусировкой на защите интересов.")
 
-tab1, tab2 = st.tabs(["🚀 Анализ и Риски", "🔍 Сравнение редакций"])
+tab_audit, tab_diff = st.tabs(["🚀 Анализ документа", "🔍 Сравнение редакций"])
 
-with tab1:
-    left, right = st.columns([1, 1.3], gap="large")
+with tab_audit:
+    ui_left, ui_right = st.columns([1, 1.2], gap="large")
     
-    with left:
-        st.subheader("1. Загрузка данных")
-        mode = st.radio("Источник:", ["Файл / Фото", "Текст"], horizontal=True)
+    with ui_left:
+        st.subheader("📥 Ввод данных")
+        input_type = st.radio("Источник:", ["Файл или Фото", "Текст"], horizontal=True)
         
-        doc_data = ""
-        u_file = None
-        is_img = False
+        raw_text = ""
+        file_obj = None
+        is_visual = False
         
-        if mode == "Файл / Фото":
-            u_file = st.file_uploader("Загрузите PDF, DOCX, TXT или Фото", type=['pdf','docx','txt','jpg','png','jpeg'])
+        if input_type == "Файл или Фото":
+            file_obj = st.file_uploader("PDF, DOCX, TXT или Фото", type=['pdf','docx','txt','jpg','png','jpeg'])
         else:
-            doc_data = st.text_area("Вставьте текст документа:", height=300)
+            raw_text = st.text_area("Вставьте текст договора:", height=300)
             
-        btn = st.button("🚀 Начать экспертизу")
+        start_btn = st.button("🚀 Начать аудит")
 
-    with right:
-        st.subheader("2. Результат анализа")
+    with ui_right:
+        st.subheader("📝 Экспертное заключение")
         
-        if btn:
-            payload = ""
-            if u_file:
-                if u_file.type in ['image/jpeg', 'image/png']:
-                    payload = Image.open(u_file)
-                    is_img = True
+        if start_btn:
+            data_to_send = None
+            if file_obj:
+                if file_obj.type in ['image/jpeg', 'image/png']:
+                    data_to_send = Image.open(file_obj)
+                    is_visual = True
                 else:
-                    payload = extract_text(u_file)
+                    data_to_send = extract_text(file_obj)
             else:
-                payload = doc_data
-            
-            if payload:
-                with st.spinner("⚖️ ИИ анализирует критические моменты..."):
-                    # ПРОМПТ ДЛЯ МЕЖДУНАРОДНОЙ ЭКСПЕРТИЗЫ
-                    sys_prompt = """
-                    Ты — ведущий юрист международной фирмы. Твоя цель: найти КРИТИЧЕСКИЕ (летальные) риски.
-                    1. Определи тип документа и юрисдикцию (страну/право).
-                    2. Вынеси вердикт: 🔴 КРАЙНЕ ОПАСНО, 🟡 НУЖНЫ ПРАВКИ, 🟢 БЕЗОПАСНО.
-                    3. Найди только критические уязвимости. Мелкие опечатки игнорируй.
-                    4. Сделай краткое резюме "Суть документа на простом языке".
-                    5. Оформи таблицу: | Критический риск | Последствие | Рекомендация |
-                    6. Если документ на английском, пиши отчет на русском, сохраняя термины в скобках.
+                data_to_send = raw_text
+                
+            if data_to_send:
+                with st.spinner("⚖️ Работает ИИ-юрист..."):
+                    # ОТКАЛИБРОВАННЫЙ ПРОМПТ
+                    system_prompt = """
+                    РОЛЬ: Старший юрист международной фирмы.
+                    ЗАДАЧА: Отделить рыночные условия от КАТАСТРОФИЧЕСКИХ рисков.
+                    
+                    ИНСТРУКЦИЯ ПО ВЕРДИКТАМ:
+                    - 🟢 БЕЗОПАСНО: Пени до 0.1%/день, расторжение 14-30 дней, стандартная подсудность.
+                    - 🟡 ЖЕЛТЫЙ: Мелкие дисбалансы (нет ответственности исполнителя, размытые сроки).
+                    - 🔴 КРИТИЧЕСКИ: Штрафы >1% в день, запрет на расторжение (ст. 782 ГК РФ), лишение прав на IP, подсудность в закрытых юрисдикциях.
+                    
+                    ОТЧЕТ:
+                    1. JURISDICTION: [Определи страну/право]
+                    2. VERDICT: [🟢/🟡/🔴]
+                    3. СУТЬ: [Кратко на простом языке]
+                    4. КРИТИЧЕСКИЕ РИСКИ: [Только если они есть. Если документ чист, так и напиши].
+                    5. ТАБЛИЦА ПРАВОК: | Пункт | Риск | Рекомендация |
+                    
+                    Язык отчета: Русский (сохраняй термины в скобках для англ. документов).
                     """
                     
                     try:
-                        if is_img:
-                            res = model.generate_content([sys_prompt, payload])
+                        if is_visual:
+                            res = model.generate_content([system_prompt, data_to_send])
                         else:
-                            res = model.generate_content(f"{sys_prompt}\n\nDOCUMENT:\n{payload[:20000]}")
-                        
-                        st.session_state['final_report'] = res.text
+                            res = model.generate_content(f"{system_prompt}\n\nДОКУМЕНТ:\n{data_to_send[:18000]}")
+                        st.session_state['last_audit'] = res.text
                     except Exception as e:
-                        st.error(f"AI Error: {e}")
+                        st.error(f"Ошибка ИИ: {e}")
 
-        if 'final_report' in st.session_state:
-            report = st.session_state['final_report']
+        if 'last_audit' in st.session_state:
+            res_text = st.session_state['last_audit']
             
-            # Извлекаем метрики для Dashboard
+            # Парсинг для плашек
             jur = "Auto-detect"
-            vdt = "Pending"
-            for line in report.split('\n'):
-                if "Юрисдикция" in line or "JURISDICTION" in line: jur = line.split(':')[-1]
-                if "вердикт" in line.lower() or "VERDICT" in line: vdt = line.split(':')[-1]
-
-            m1, m2 = st.columns(2)
-            m1.metric("Юрисдикция", jur.strip())
-            m2.metric("Вердикт", vdt.strip())
+            vdt = "Analysis done"
+            for line in res_text.split('\n'):
+                if "JURISDICTION" in line: jur = line.split(':')[-1]
+                if "VERDICT" in line: vdt = line.split(':')[-1]
+            
+            m_col1, m_col2 = st.columns(2)
+            m_col1.metric("Юрисдикция", jur.strip())
+            m_col2.metric("Вердикт", vdt.strip())
             
             st.divider()
             
-            # Кнопка скачивания
-            word_file = create_pro_docx(report)
-            st.download_button(
-                label="📥 Скачать официальный отчет (.docx)",
-                data=word_file,
-                file_name="Legal_AI_Report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            doc_file = create_pro_docx(res_text)
+            st.download_button("📥 Скачать Word-отчет", data=doc_file, file_name="Legal_Report.docx", use_container_width=True)
             
-            with st.expander("📄 Посмотреть полный текст анализа", expanded=True):
-                st.markdown(report)
+            with st.expander("📄 Детальный разбор", expanded=True):
+                st.markdown(res_text)
 
-with tab2:
-    st.subheader("Сравнение двух версий одного документа")
-    c1, c2 = st.columns(2)
-    with c1: f1 = st.file_uploader("Оригинал", key="comp1")
-    with c2: f2 = st.file_uploader("Версия с правками", key="comp2")
-    
-    if st.button("🔎 Найти юридические изменения"):
+with tab_diff:
+    st.subheader("Сравнение версий")
+    d1, d2 = st.columns(2)
+    with d1: f1 = st.file_uploader("Оригинал", key="d1")
+    with d2: f2 = st.file_uploader("Новая версия", key="d2")
+    if st.button("🔎 Найти опасные изменения"):
         if f1 and f2:
-            t1, t2 = extract_text(f1), extract_text(f2)
-            comp_res = model.generate_content(f"Сравни эти документы. Выдели только те изменения, которые меняют ответственность сторон или сроки: \n1: {t1[:9000]} \n2: {t2[:9000]}")
-            st.markdown(comp_res.text)
+            with st.spinner("Сравнение..."):
+                t1, t2 = extract_text(f1), extract_text(f2)
+                diff = model.generate_content(f"Сравни тексты и выдели только те изменения, которые УХУДШАЮТ положение Заказчика: \n1: {t1[:9000]} \n2: {t2[:9000]}")
+                st.markdown(diff.text)
 
-st.divider()
-st.caption("LegalAI Universal Enterprise 2026 | Powered by Gemini 2.5")
+st.markdown("---")
+st.caption("LegalAI Enterprise 2026. Конфиденциальность гарантирована.")
+    
