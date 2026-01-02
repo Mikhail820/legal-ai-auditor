@@ -7,25 +7,25 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 from PIL import Image
 
-# --- 1. КОНФИГУРАЦИЯ ---
-st.set_page_config(page_title="LegalAI Enterprise Full", page_icon="⚖️", layout="wide")
+# --- 1. НАСТРОЙКИ СТРАНИЦЫ ---
+st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
 
 # Инициализация ИИ
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     model = genai.GenerativeModel('models/gemini-2.5-flash', generation_config={"temperature": 0.0}) 
 else:
-    st.error("🚨 Ключ API не найден в Secrets.")
+    st.error("🚨 Ключ API не найден в Secrets (GOOGLE_API_KEY).")
     st.stop()
 
-# --- 2. ФУНКЦИИ ОБРАБОТКИ ---
+# --- 2. ФУНКЦИИ ОЧИСТКИ И ОБРАБОТКИ ---
 
-def read_txt_safe(file):
-    raw = file.read()
-    for enc in ['utf-8', 'windows-1251', 'cp1251']:
-        try: return raw.decode(enc)
-        except: continue
-    return "Ошибка кодировки текста."
+def clear_session():
+    """Полная очистка всех данных"""
+    st.session_state['report'] = None
+    st.session_state['diff_report'] = None
+    # Очистка через перезагрузку для сброса виджетов
+    st.rerun()
 
 def extract_text(file):
     try:
@@ -34,137 +34,121 @@ def extract_text(file):
         elif file.name.endswith(".docx"):
             return "\n".join([p.text for p in Document(file).paragraphs])
         elif file.name.endswith(".txt"):
-            return read_txt_safe(file)
+            raw = file.read()
+            for enc in ['utf-8', 'windows-1251', 'cp1251']:
+                try: return raw.decode(enc)
+                except: continue
     except Exception as e:
-        return f"Ошибка: {e}"
+        return f"Ошибка чтения: {e}"
+    return ""
 
-def create_docx(report_text):
-    doc = Document()
-    doc.styles['Normal'].font.name = 'Arial'
-    doc.styles['Normal'].font.size = Pt(11)
-    doc.add_heading('ОТЧЕТ ЮРИДИЧЕСКОГО АНАЛИЗА', 0)
-    
-    clean_text = report_text.replace('**', '').replace('###', '').replace('`', '')
-    lines = clean_text.split('\n')
-    
-    table_buffer = []
-    for line in lines:
-        stripped = line.strip()
-        if '|' in stripped and set(stripped.replace('|', '').replace(' ', '')) != {'-'}:
-            row = [c.strip() for c in stripped.split('|') if c.strip()]
-            if row: table_buffer.append(row)
-        else:
-            if table_buffer:
-                table = doc.add_table(rows=0, cols=max(len(r) for r in table_buffer))
-                table.style = 'Table Grid'
-                for r_idx, r_data in enumerate(table_buffer):
-                    cells = table.add_row().cells
-                    for c_idx, val in enumerate(r_data):
-                        if c_idx < len(cells): cells[c_idx].text = val
-                table_buffer = []
-            if stripped and not set(stripped.replace('|', '').replace(' ', '')) == {'-'}:
-                doc.add_paragraph(stripped)
-    
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-    return buf
-
-# --- 3. ИНТЕРФЕЙС ---
+# --- 3. БОКОВАЯ ПАНЕЛЬ (НАСТРОЙКИ) ---
 
 with st.sidebar:
-    st.title("🛡️ Контроль")
-    st.info("Режим: Критические риски")
-    st.warning("⚠️ Внимание: Отчет генерируется ИИ. Не является финансовой или юридической консультацией.")
+    st.title("⚙️ Параметры")
+    
+    # 1. Степень анализа
+    depth = st.select_slider(
+        "Глубина проверки:",
+        options=["Базовый", "Стандарт", "Глубокий"],
+        value="Стандарт",
+        help="Базовый: только штрафы. Глубокий: скрытые риски и права собственности."
+    )
+    
     st.divider()
-    st.markdown("""
-    **Легенда:**
-    🟢 - Нормальные условия
-    🟡 - Рекомендуются правки
-    🔴 - Кабальные условия
-    """)
+    
+    # 2. Кнопка удаления данных
+    if st.button("🗑️ Очистить всё", use_container_width=True):
+        clear_session()
+    
+    st.divider()
+    st.markdown("### Памятка:")
+    st.caption("🟢 - Безопасно\n🟡 - Требует внимания\n🔴 - Критично")
+
+# --- 4. ОСНОВНОЙ ИНТЕРФЕЙС ---
 
 st.title("⚖️ LegalAI International")
 tab_audit, tab_diff = st.tabs(["🚀 Анализ документа", "🔍 Сравнение редакций"])
 
-# --- ВКЛАДКА АУДИТА ---
 with tab_audit:
-    col_in, col_out = st.columns([1, 1.2], gap="large")
+    ui_in, ui_out = st.columns([1, 1.2], gap="large")
     
-    with col_in:
+    with ui_in:
         st.subheader("Ввод данных")
-        src = st.radio("Источник:", ["Файл / Фото", "Текст"], horizontal=True)
+        input_mode = st.radio("Способ:", ["Файл / Фото", "Вставить текст"], horizontal=True)
         
-        input_data = ""
+        doc_content = ""
         u_file = None
-        is_visual = False
         
-        if src == "Файл / Фото":
-            u_file = st.file_uploader("Загрузите PDF, DOCX, TXT или Фото", type=['pdf','docx','txt','jpg','png','jpeg'])
+        if input_mode == "Файл / Фото":
+            u_file = st.file_uploader("Загрузите документ", type=['pdf','docx','txt','jpg','png','jpeg'], key="uploader_main")
         else:
-            input_data = st.text_area("Вставьте текст здесь:", height=300)
+            doc_content = st.text_area("Текст договора:", height=300, key="text_main", placeholder="Вставьте текст здесь...")
             
-        btn = st.button("🚀 Проверить критические риски")
-
-    with col_out:
-        st.subheader("Результат")
-        if btn:
+        if st.button("🚀 Начать анализ", type="primary", use_container_width=True):
             payload = ""
+            is_img = False
+            
             if u_file:
                 if u_file.type in ['image/jpeg', 'image/png']:
-                    payload, is_visual = Image.open(u_file), True
+                    payload, is_img = Image.open(u_file), True
                 else:
                     payload = extract_text(u_file)
             else:
-                payload = input_data
+                payload = doc_content
             
             if payload:
-                with st.spinner("Анализируем..."):
-                    sys_prompt = """
-                    ТЫ — СТРОГИЙ ЮРИДИЧЕСКИЙ АУДИТОР. ПИШИ ТОЛЬКО ПО СУЩЕСТВУ. 
-                    БЕЗ ПРИВЕТСТВИЙ И ВВОДНЫХ ФРАЗ.
+                with st.spinner(f"Выполняю {depth} аудит..."):
+                    # Логика промпта в зависимости от глубины
+                    depth_prompts = {
+                        "Базовый": "Фокусируйся исключительно на финансовых рисках, пенях и сроках оплаты.",
+                        "Стандарт": "Проверь штрафы, сроки, условия расторжения и подсудность.",
+                        "Глубокий": "Полный юридический аудит: права на ИС, скрытые штрафы, односторонние отказы, неясные формулировки и баланс интересов."
+                    }
                     
-                    СТРУКТУРА:
-                    1. JURISDICTION: [Страна/Право]
+                    full_prompt = f"""
+                    РОЛЬ: Юридический ревизор. ГЛУБИНА: {depth}.
+                    {depth_prompts[depth]}
+                    
+                    ФОРМАТ ОТЧЕТА (СТРОГО):
+                    1. JURISDICTION: [Страна]
                     2. VERDICT: [🟢/🟡/🔴]
-                    3. ГЛАВНАЯ СУТЬ: [О чем договор простыми словами]
-                    4. ТАБЛИЦА КРИТИЧЕСКИХ РИСКОВ:
-                    | ПУНКТ | ЧЕМ ЭТО ПЛОХО | КАК ИСПРАВИТЬ |
+                    3. СУТЬ: [Кратко]
+                    4. ТАБЛИЦА РИСКОВ:
+                    | ПУНКТ | РИСК (ПОНЯТНО) | КАК ИСПРАВИТЬ |
                     |---|---|---|
-                    | [Название] | [Риск для кошелька/прав] | [Фраза для замены] |
                     
-                    ПРАВИЛА:
-                    - Не выдумывай риски. Если договор стандартный — пиши "Критических рисков нет".
-                    - Штраф до 0.1% в день — это НОРМА (🟢).
-                    - Штраф от 1% в день или запрет на выход из договора — это КРИТИЧЕСКИ (🔴).
+                    БЕЗ ПРИВЕТСТВИЙ. Если рисков нет, напиши "Критические риски отсутствуют".
                     """
+                    
                     try:
-                        if is_visual: res = model.generate_content([sys_prompt, payload])
-                        else: res = model.generate_content(f"{sys_prompt}\n\nДОКУМЕНТ:\n{payload[:18000]}")
-                        
+                        if is_img:
+                            res = model.generate_content([full_prompt, payload])
+                        else:
+                            res = model.generate_content(f"{full_prompt}\n\nДОКУМЕНТ:\n{payload[:19000]}")
                         st.session_state['report'] = res.text
-                        st.markdown(res.text)
-                        
-                        doc_file = create_docx(res.text)
-                        st.download_button("📥 Скачать Word-отчет", data=doc_file, file_name="Legal_Audit.docx")
                     except Exception as e:
-                        st.error(f"Ошибка: {e}")
+                        st.error(f"Ошибка ИИ: {e}")
 
-# --- ВКЛАДКА СРАВНЕНИЯ ---
+    with ui_out:
+        st.subheader("Заключение")
+        if st.session_state.get('report'):
+            st.markdown(st.session_state['report'])
+            # Тут можно добавить кнопку скачивания Word из прошлых версий
+
+# --- 5. ВКЛАДКА СРАВНЕНИЯ ---
 with tab_diff:
-    st.subheader("Сравнение двух версий договора")
-    d_col1, d_col2 = st.columns(2)
-    with d_col1: f1 = st.file_uploader("Оригинал", key="f1")
-    with d_col2: f2 = st.file_uploader("Версия с правками", key="f2")
+    st.subheader("Сравнение версий договора")
+    c1, c2 = st.columns(2)
+    with c1: f1 = st.file_uploader("Оригинал (v1)", key="c1")
+    with c2: f2 = st.file_uploader("Версия с правками (v2)", key="c2")
     
-    if st.button("🔎 Найти опасные изменения"):
+    if st.button("🔎 Сравнить и найти риски", use_container_width=True):
         if f1 and f2:
-            with st.spinner("Сравниваем..."):
+            with st.spinner("Ищу скрытые изменения..."):
                 t1, t2 = extract_text(f1), extract_text(f2)
-                diff = model.generate_content(f"Сравни тексты. Выдели только те изменения, которые УХУДШАЮТ положение Заказчика (увеличивают штрафы, сроки, убирают права): \n1: {t1[:9000]} \n2: {t2[:9000]}")
-                st.markdown(diff.text)
-        else:
-            st.warning("Загрузите оба файла.")
-
-st.markdown("---")
-st.caption("LegalAI Enterprise 2026. Конфиденциальный аудит.")
+                diff_prompt = "Сравни тексты. Выдели только те изменения, которые УХУДШАЮТ положение Заказчика. Оформи таблицей: Изменение | Риск."
+                res_diff = model.generate_content(f"{diff_prompt}\n\n1: {t1[:9000]}\n2: {t2[:9000]}")
+                st.session_state['diff_report'] = res_diff.text
+                st.markdown(res_diff.text)
+        
