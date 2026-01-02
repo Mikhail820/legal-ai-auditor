@@ -3,14 +3,13 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
 from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 from PIL import Image
+import re
 
-# --- 1. НАСТРОЙКИ СТРАНИЦЫ ---
-st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
+# --- 1. НАСТРОЙКИ ---
+st.set_page_config(page_title="LegalAI Mobile", page_icon="⚖️", layout="wide")
 
-# Инициализация ИИ
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     model = genai.GenerativeModel('models/gemini-2.5-flash', generation_config={"temperature": 0.0}) 
@@ -31,136 +30,99 @@ def extract_text(file):
             for enc in ['utf-8', 'windows-1251', 'cp1251']:
                 try: return raw.decode(enc)
                 except: continue
-    except Exception as e:
-        return f"Ошибка: {e}"
+    except Exception as e: return f"Ошибка: {e}"
     return ""
 
-def create_docx_with_tables(report_text):
-    """Исправленная функция генерации Word с таблицами"""
+def create_docx_pro(report_text):
     doc = Document()
-    doc.add_heading('ЮРИДИЧЕСКИЙ ОТЧЕТ', 0)
-    
+    doc.add_heading('ЮРИДИЧЕСКИЙ АНАЛИЗ', 0)
     lines = report_text.split('\n')
-    table_data = []
-    
+    table_rows = []
     for line in lines:
-        if '|' in line and '---' not in line:
-            row = [cell.strip() for cell in line.split('|') if cell.strip()]
-            if row: table_data.append(row)
+        clean_line = line.strip()
+        if clean_line.startswith('|') and clean_line.endswith('|'):
+            if re.match(r'^\|[ \-:|]+\|$', clean_line): continue
+            cells = [c.strip() for c in clean_line.split('|') if c.strip()]
+            if cells: table_rows.append(cells)
         else:
-            if table_data:
-                table = doc.add_table(rows=0, cols=len(table_data[0]))
+            if table_rows:
+                num_cols = max(len(r) for r in table_rows)
+                table = doc.add_table(rows=0, cols=num_cols)
                 table.style = 'Table Grid'
-                for r in table_data:
+                for r_idx, r_data in enumerate(table_rows):
                     row_cells = table.add_row().cells
-                    for i, val in enumerate(r):
-                        row_cells[i].text = val
-                table_data = []
-            if line.strip():
-                doc.add_paragraph(line.strip())
-    
+                    for c_idx, val in enumerate(r_data):
+                        if c_idx < num_cols: row_cells[c_idx].text = val
+                table_rows = []
+            if clean_line: doc.add_paragraph(clean_line)
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
     return buf
 
-# --- 3. ИНТЕРФЕЙС И НАСТРОЙКИ ---
+# --- 3. ИНТЕРФЕЙС ---
 
-with st.sidebar:
-    st.title("⚙️ Настройки")
-    
-    # ВЫБОР СТЕПЕНИ АНАЛИЗА
-    analysis_level = st.select_slider(
-        "Глубина проверки:",
-        options=["Базовая", "Стандартная", "Глубокая"],
+st.title("⚖️ LegalAI Enterprise")
+
+# Секция настроек (теперь видна сразу на телефоне)
+with st.expander("⚙️ НАСТРОЙКИ АНАЛИЗА", expanded=True):
+    depth = st.select_slider(
+        "Глубина проверки:", 
+        options=["Базовая", "Стандартная", "Глубокая"], 
         value="Стандартная"
     )
-    
-    st.divider()
-    
-    if st.button("🗑️ Очистить всё", use_container_width=True):
+    if st.button("🗑️ СБРОСИТЬ ВСЕ ДАННЫЕ", use_container_width=True):
         st.session_state.clear()
         st.rerun()
-        
-    st.info(f"Текущий режим: {analysis_level}")
 
-st.title("⚖️ LegalAI International System")
+tab_audit, tab_diff = st.tabs(["🚀 АНАЛИЗ", "🔍 СРАВНЕНИЕ"])
 
-tab1, tab2 = st.tabs(["🚀 Аудит документа", "🔍 Сравнение версий"])
-
-with tab1:
-    col_in, col_out = st.columns([1, 1.2], gap="large")
+with tab_audit:
+    mode = st.radio("Источник:", ["Файл / Фото", "Текст"], horizontal=True)
     
-    with col_in:
-        st.subheader("Ввод данных")
-        mode = st.radio("Источник:", ["Файл / Фото", "Текст"], horizontal=True)
-        
+    if mode == "Файл / Фото":
+        u_file = st.file_uploader("Загрузить документ или фото", type=['pdf','docx','txt','jpg','png','jpeg'])
+        txt_u = ""
+    else:
+        txt_u = st.text_area("Вставьте текст договора:", height=200, key="main_text_input")
         u_file = None
-        txt_input = ""
-        
-        if mode == "Файл / Фото":
-            u_file = st.file_uploader("Загрузите документ", type=['pdf','docx','txt','jpg','png','jpeg'], key="file_audit")
-        else:
-            txt_input = st.text_area("Вставьте текст:", height=300, key="text_audit")
-            
-        if st.button("🚀 Начать проверку", type="primary", use_container_width=True):
-            content = ""
-            is_img = False
-            
-            if u_file:
-                if u_file.type in ['image/jpeg', 'image/png']:
-                    content, is_img = Image.open(u_file), True
-                else:
-                    content = extract_text(u_file)
-            else:
-                content = txt_input
-                
-            if content:
-                with st.spinner(f"Выполняется {analysis_level} анализ..."):
-                    prompts = {
-                        "Базовая": "Проверь только штрафы и сроки оплаты.",
-                        "Стандартная": "Проверь штрафы, сроки, условия расторжения и подсудность.",
-                        "Глубокая": "Полный аудит: риски интеллектуальной собственности, скрытые комиссии, баланс прав сторон и все лазейки."
-                    }
-                    
-                    sys_msg = f"""
-                    ТЫ — ЭКСПЕРТ-ЮРИСТ. ГЛУБИНА: {analysis_level}. {prompts[analysis_level]}
-                    ОТЧЕТ СТРОГО ПО ФОРМАТУ:
-                    1. JURISDICTION: [Страна]
-                    2. VERDICT: [🟢/🟡/🔴]
-                    3. ТАБЛИЦА РИСКОВ:
-                    | ПУНКТ | РИСК | РЕКОМЕНДАЦИЯ |
-                    |---|---|---|
-                    [Заполни таблицу]
-                    
-                    БЕЗ ВВОДНЫХ СЛОВ.
-                    """
-                    
-                    try:
-                        res = model.generate_content([sys_msg, content]) if is_img else model.generate_content(f"{sys_msg}\n\n{content[:20000]}")
-                        st.session_state['main_report'] = res.text
-                    except Exception as e:
-                        st.error(f"Ошибка ИИ: {e}")
 
-    with col_out:
-        st.subheader("Результат")
-        if 'main_report' in st.session_state:
-            report = st.session_state['main_report']
-            st.markdown(report)
-            
-            word_file = create_docx_with_tables(report)
-            st.download_button("📥 Скачать Word", data=word_file, file_name="Legal_Audit.docx", use_container_width=True)
+    if st.button("🚀 НАЧАТЬ ПРОВЕРКУ", type="primary", use_container_width=True):
+        content = Image.open(u_file) if u_file and u_file.type.startswith('image') else (extract_text(u_file) if u_file else txt_u)
+        if content:
+            with st.spinner("ИИ анализирует..."):
+                p_logic = {
+                    "Базовая": "Только штрафы и сроки.",
+                    "Стандартная": "Штрафы, расторжение, подсудность, сроки.",
+                    "Глубокая": "Полный аудит: интеллектуальная собственность, скрытые обязанности, баланс сторон."
+                }
+                sys_prompt = f"""
+                ТЫ — ЮРИСТ. ГЛУБИНА: {depth}. {p_logic[depth]}
+                ОТЧЕТ СТРОГО ПО ФОРМАТУ:
+                1. JURISDICTION: [Страна]
+                2. VERDICT: [🟢/🟡/🔴]
+                3. ТАБЛИЦА РИСКОВ:
+                | ПУНКТ | РИСК | ИСПРАВЛЕНИЕ |
+                |---|---|---|
+                4. ГОТОВЫЙ ОТВЕТ: [Текст для контрагента]
+                """
+                try:
+                    res = model.generate_content([sys_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{sys_prompt}\n\n{content}")
+                    st.session_state['rep'] = res.text
+                except Exception as e: st.error(f"Ошибка: {e}")
 
-with tab2:
-    st.subheader("Сравнение редакций")
-    c1, c2 = st.columns(2)
-    with c1: f1 = st.file_uploader("Оригинал", key="comp1")
-    with c2: f2 = st.file_uploader("Правки", key="comp2")
-    
-    if st.button("🔎 Сравнить", use_container_width=True):
+    if 'rep' in st.session_state:
+        st.divider()
+        st.markdown(st.session_state['rep'])
+        st.download_button("📥 СКАЧАТЬ WORD ОТЧЕТ", data=create_docx_pro(st.session_state['rep']), file_name="Report.docx", use_container_width=True)
+
+with tab_diff:
+    st.subheader("Сравнение версий")
+    f1 = st.file_uploader("Оригинал", key="f1")
+    f2 = st.file_uploader("Правки", key="f2")
+    if st.button("🔎 СРАВНИТЬ", use_container_width=True):
         if f1 and f2:
-            with st.spinner("Сравнение..."):
-                t1, t2 = extract_text(f1), extract_text(f2)
-                diff_res = model.generate_content(f"Сравни тексты и выдели только изменения, ухудшающие положение Заказчика:\n1: {t1[:9000]}\n2: {t2[:9000]}")
-                st.markdown(diff_res.text)
+            t1, t2 = extract_text(f1), extract_text(f2)
+            res_d = model.generate_content(f"Сравни и найди только УХУДШЕНИЯ для клиента:\n1: {t1[:8000]}\n2: {t2[:8000]}")
+            st.markdown(res_d.text)
             
