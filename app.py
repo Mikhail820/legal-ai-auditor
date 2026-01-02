@@ -8,7 +8,7 @@ from PIL import Image
 import re
 
 # --- 1. НАСТРОЙКИ ---
-st.set_page_config(page_title="LegalAI Mobile", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="LegalAI Enterprise", page_icon="⚖️", layout="wide")
 
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
@@ -35,13 +35,19 @@ def extract_text(file):
 
 def create_docx_pro(report_text):
     doc = Document()
+    # Добавляем дисклеймер в начало документа Word
+    warning_p = doc.add_paragraph("ВАЖНО: Данный отчет сформирован нейросетью. Он носит информационный характер и не является официальным юридическим заключением. Рекомендуется консультация с квалифицированным юристом.")
+    warning_p.runs[0].font.bold = True
+    warning_p.runs[0].font.size = Pt(10)
+    
     doc.add_heading('ЮРИДИЧЕСКИЙ АНАЛИЗ', 0)
     lines = report_text.split('\n')
     table_rows = []
+    
     for line in lines:
         clean_line = line.strip()
-        if clean_line.startswith('|') and clean_line.endswith('|'):
-            if re.match(r'^\|[ \-:|]+\|$', clean_line): continue
+        if clean_line.count('|') >= 2:
+            if re.match(r'^[ \d\.\-\|:]+$', clean_line): continue
             cells = [c.strip() for c in clean_line.split('|') if c.strip()]
             if cells: table_rows.append(cells)
         else:
@@ -52,9 +58,10 @@ def create_docx_pro(report_text):
                 for r_idx, r_data in enumerate(table_rows):
                     row_cells = table.add_row().cells
                     for c_idx, val in enumerate(r_data):
-                        if c_idx < num_cols: row_cells[c_idx].text = val
+                        if c_idx < len(row_cells): row_cells[c_idx].text = val
                 table_rows = []
             if clean_line: doc.add_paragraph(clean_line)
+            
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
@@ -64,8 +71,10 @@ def create_docx_pro(report_text):
 
 st.title("⚖️ LegalAI Enterprise")
 
-# Секция настроек (теперь видна сразу на телефоне)
-with st.expander("⚙️ НАСТРОЙКИ АНАЛИЗА", expanded=True):
+# Главное предупреждение
+st.warning("⚠️ **ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ:** Результаты анализа не являются профессиональной юридической консультацией. Ответственность за использование рекомендаций лежит на пользователе.")
+
+with st.expander("⚙️ НАСТРОЙКИ АНАЛИЗА", expanded=False):
     depth = st.select_slider(
         "Глубина проверки:", 
         options=["Базовая", "Стандартная", "Глубокая"], 
@@ -92,13 +101,16 @@ with tab_audit:
         if content:
             with st.spinner("ИИ анализирует..."):
                 p_logic = {
-                    "Базовая": "Только штрафы и сроки.",
-                    "Стандартная": "Штрафы, расторжение, подсудность, сроки.",
-                    "Глубокая": "Полный аудит: интеллектуальная собственность, скрытые обязанности, баланс сторон."
+                    "Базовая": "Фокусируйся на финансовых рисках и сроках.",
+                    "Стандартная": "Проверь штрафы, расторжение, подсудность и сроки.",
+                    "Глубокая": "Полный аудит: интеллектуальная собственность, баланс сторон, скрытые условия."
                 }
+                
                 sys_prompt = f"""
-                ТЫ — ЮРИСТ. ГЛУБИНА: {depth}. {p_logic[depth]}
-                ОТЧЕТ СТРОГО ПО ФОРМАТУ:
+                ТЫ — ЮРИДИЧЕСКИЙ ПОМОЩНИК. ГЛУБИНА: {depth}. {p_logic[depth]}
+                ОБЯЗАТЕЛЬНО начни отчет с фразы: "Данный отчет сформирован ИИ и не является юридическим документом."
+                
+                ОТЧЕТ ПО ФОРМАТУ:
                 1. JURISDICTION: [Страна]
                 2. VERDICT: [🟢/🟡/🔴]
                 3. ТАБЛИЦА РИСКОВ:
@@ -106,6 +118,7 @@ with tab_audit:
                 |---|---|---|
                 4. ГОТОВЫЙ ОТВЕТ: [Текст для контрагента]
                 """
+                
                 try:
                     res = model.generate_content([sys_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{sys_prompt}\n\n{content}")
                     st.session_state['rep'] = res.text
@@ -125,4 +138,7 @@ with tab_diff:
             t1, t2 = extract_text(f1), extract_text(f2)
             res_d = model.generate_content(f"Сравни и найди только УХУДШЕНИЯ для клиента:\n1: {t1[:8000]}\n2: {t2[:8000]}")
             st.markdown(res_d.text)
-            
+
+st.markdown("---")
+st.caption("LegalAI Enterprise 2026. Информация предоставляется исключительно в ознакомительных целях.")
+                
