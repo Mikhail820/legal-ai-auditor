@@ -22,7 +22,6 @@ st.markdown("""
 # Инициализация ИИ
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Temperature 0.0 для максимальной юридической строгости
     model = genai.GenerativeModel('models/gemini-2.5-flash', generation_config={"temperature": 0.0}) 
 else:
     st.error("🚨 Ключ API не найден. Добавьте GOOGLE_API_KEY в Settings > Secrets.")
@@ -33,8 +32,10 @@ else:
 def read_txt_safe(file):
     raw = file.read()
     for enc in ['utf-8', 'windows-1251', 'cp1251']:
-        try: return raw.decode(enc)
-    except: continue
+        try:
+            return raw.decode(enc)
+        except:
+            continue
     return "Error: Encoding fail."
 
 def extract_text(file):
@@ -139,7 +140,6 @@ with tab_audit:
                 
             if data_to_send:
                 with st.spinner("⚖️ Работает ИИ-юрист..."):
-                    # ОТКАЛИБРОВАННЫЙ ПРОМПТ
                     system_prompt = """
                     РОЛЬ: Старший юрист международной фирмы.
                     ЗАДАЧА: Отделить рыночные условия от КАТАСТРОФИЧЕСКИХ рисков.
@@ -156,7 +156,7 @@ with tab_audit:
                     4. КРИТИЧЕСКИЕ РИСКИ: [Только если они есть. Если документ чист, так и напиши].
                     5. ТАБЛИЦА ПРАВОК: | Пункт | Риск | Рекомендация |
                     
-                    Язык отчета: Русский (сохраняй термины в скобках для англ. документов).
+                    Язык отчета: Русский.
                     """
                     
                     try:
@@ -171,7 +171,6 @@ with tab_audit:
         if 'last_audit' in st.session_state:
             res_text = st.session_state['last_audit']
             
-            # Парсинг для плашек
             jur = "Auto-detect"
             vdt = "Analysis done"
             for line in res_text.split('\n'):
@@ -204,4 +203,4 @@ with tab_diff:
 
 st.markdown("---")
 st.caption("LegalAI Enterprise 2026. Конфиденциальность гарантирована.")
-    
+        
