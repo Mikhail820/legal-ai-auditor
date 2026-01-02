@@ -32,27 +32,44 @@ def extract_text(file):
 
 def create_docx(report_text):
     doc = Document()
+    # Настройка стиля
     style = doc.styles['Normal']
     style.font.name = 'Arial'
     style.font.size = Pt(11)
-    doc.add_heading('Юридический анализ документа', 0)
     
-    clean_text = report_text.replace('**', '').replace('###', '').replace('🔴', 'РИСК:').replace('🟡', 'ВНИМАНИЕ:').replace('🟢', 'ОК:')
-    sections = clean_text.split('\n\n')
+    doc.add_heading('Юридическое заключение LegalAI', 0)
     
-    for section in sections:
-        if '|' in section:
-            lines = [l.strip() for l in section.split('\n') if l.strip()]
-            if len(lines) > 1:
-                table = doc.add_table(rows=0, cols=lines[0].count('|') + 1)
-                table.style = 'Table Grid'
-                for line in lines:
-                    if '---' in line: continue
-                    row_cells = table.add_row().cells
-                    for i, content in enumerate(line.split('|')):
-                        if i < len(row_cells): row_cells[i].text = content.strip()
+    # Очищаем текст от Markdown артефактов
+    clean_text = report_text.replace('**', '').replace('###', '')
+    
+    lines = clean_text.split('\n')
+    in_table = False
+    table_data = []
+
+    for line in lines:
+        if '|' in line and '-' not in line:
+            # Это строка таблицы
+            in_table = True
+            cells = [c.strip() for c in line.split('|') if c.strip()]
+            if cells:
+                table_data.append(cells)
         else:
-            doc.add_paragraph(section)
+            if in_table:
+                # Рисуем таблицу, когда она закончилась в тексте
+                if table_data:
+                    num_cols = max(len(row) for row in table_data)
+                    word_table = doc.add_table(rows=0, cols=num_cols)
+                    word_table.style = 'Table Grid'
+                    for row_data in table_data:
+                        row_cells = word_table.add_row().cells
+                        for i, content in enumerate(row_data):
+                            if i < num_cols:
+                                row_cells[i].text = content
+                table_data = []
+                in_table = False
+            
+            if line.strip():
+                doc.add_paragraph(line.strip())
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -60,79 +77,64 @@ def create_docx(report_text):
 
 # --- 3. ИНТЕРФЕЙС ---
 
-st.title("⚖️ LegalAI Universal")
-st.subheader("Универсальный аудит: Файлы, Фото или Текст из буфера")
+st.title("⚖️ LegalAI Universal Pro")
+st.subheader("Автоматический аудит: Файлы, Фото или Текст")
 
-tab1, tab2 = st.tabs(["🚀 Анализ документа", "🔍 Сравнение версий"])
+tab1, tab2 = st.tabs(["🚀 Анализ", "🔍 Сравнение"])
 
 with tab1:
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.write("### 📥 Ввод данных")
-        
-        # Выбор способа ввода
-        input_method = st.radio("Выберите способ загрузки:", ["Загрузить файл/фото", "Вставить текст из буфера"])
-        
-        final_text = ""
+        method = st.radio("Способ ввода:", ["Файл/Фото", "Текст из буфера"])
+        input_content = ""
         u_file = None
         
-        if input_method == "Загрузить файл/фото":
-            u_file = st.file_uploader("Загрузите PDF, DOCX или Фото", type=["pdf", "docx", "jpg", "png", "jpeg"])
+        if method == "Файл/Фото":
+            u_file = st.file_uploader("Загрузите документ", type=["pdf", "docx", "jpg", "png", "jpeg"])
         else:
-            final_text = st.text_area("Вставьте текст документа здесь:", height=300, placeholder="Скопируйте текст договора или акта и вставьте его сюда...")
+            input_content = st.text_area("Вставьте текст здесь:", height=300)
 
         if st.button("🚀 Провести экспертизу"):
-            # Проверка наличия данных
-            if (input_method == "Загрузить файл/фото" and u_file) or (input_method == "Вставить текст из буфера" and final_text):
-                with st.spinner("ИИ проводит юридическую экспертизу..."):
-                    try:
-                        if u_file and u_file.type in ["image/jpeg", "image/png"]:
-                            img = Image.open(u_file)
-                            prompt = "Определи тип документа на фото. Проведи аудит, выдели риски и составь таблицу правок."
-                            res = model.generate_content([prompt, img])
-                        else:
-                            # Если загружен файл-текст, извлекаем его, иначе берем из text_area
-                            content_to_analyze = extract_text(u_file) if u_file else final_text
-                            
-                            prompt = f"""Ты ведущий юрист РФ. 
-                            1. Определи тип документа. 
-                            2. Дай оценку безопасности (🔴/🟡/🟢). 
-                            3. Проанализируй содержание на соответствие законам РФ. 
-                            4. Найди критические риски. 
-                            5. Составь таблицу: 'Пункт' | 'Риск' | 'Рекомендация'. 
-                            Документ: {content_to_analyze[:18000]}"""
-                            res = model.generate_content(prompt)
-                        
-                        st.session_state['full_res'] = res.text
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}")
+            data_to_send = ""
+            if u_file:
+                if u_file.type in ["image/jpeg", "image/png"]:
+                    with st.spinner("Распознаю фото..."):
+                        img = Image.open(u_file)
+                        res = model.generate_content(["Ты юрист. Определи тип документа, найди риски и сделай таблицу правок.", img])
+                        st.session_state['res'] = res.text
+                else:
+                    data_to_send = extract_text(u_file)
             else:
-                st.warning("Пожалуйста, загрузите файл или вставьте текст.")
+                data_to_send = input_content
+
+            if data_to_send:
+                with st.spinner("ИИ анализирует..."):
+                    prompt = f"""Ты топ-юрист РФ. 
+                    1. Определи тип документа. 
+                    2. Оценка (🔴/🟡/🟢). 
+                    3. Найди риски. 
+                    4. Создай таблицу: Пункт | Риск | Рекомендация. 
+                    Текст: {data_to_send[:18000]}"""
+                    res = model.generate_content(prompt)
+                    st.session_state['res'] = res.text
 
     with col2:
-        if 'full_res' in st.session_state:
-            st.write("### 📝 Результат анализа")
-            st.markdown(st.session_state['full_res'])
+        if 'res' in st.session_state:
+            st.markdown(st.session_state['res'])
             st.download_button(
-                "📥 Скачать отчет в Word",
-                data=create_docx(st.session_state['full_res']),
+                "📥 Скачать отчет в Word (.docx)",
+                data=create_docx(st.session_state['res']),
                 file_name="legal_report.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
 with tab2:
-    st.write("### 🔍 Сравнение двух редакций")
-    c_a, c_b = st.columns(2)
-    f_old = c_a.file_uploader("Версия 1", type=["pdf", "docx"], key="v1")
-    f_new = c_b.file_uploader("Версия 2", type=["pdf", "docx"], key="v2")
+    st.write("### Сравнение редакций")
+    f1 = st.file_uploader("Версия 1", type=["pdf", "docx"], key="v1")
+    f2 = st.file_uploader("Версия 2", type=["pdf", "docx"], key="v2")
+    if st.button("🔎 Сравнить"):
+        if f1 and f2:
+            t1, t2 = extract_text(f1), extract_text(f2)
+            res = model.generate_content(f"Сравни изменения: \n1: {t1[:9000]} \n2: {t2[:9000]}")
+            st.markdown(res.text)
     
-    if st.button("🔎 Найти отличия"):
-        if f_old and f_new:
-            with st.spinner("Сравниваю изменения..."):
-                t1, t2 = extract_text(f_old), extract_text(f_new)
-                res = model.generate_content(f"Найди изменения в правах и обязанностях сторон: \n1: {t1[:9000]} \n2: {t2[:9000]}")
-                st.markdown(res.text)
-
-st.markdown("---")
-st.caption("LegalAI Universal 2026. Поддержка PDF, Word, Фото и ручного ввода.")
-        
