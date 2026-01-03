@@ -30,7 +30,7 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# Прямое обращение к модели без "models/" решает проблему со скриншота
+# Прямое обращение к модели без "models/" решает проблему 404
 model = genai.GenerativeModel(
     "gemini-1.5-flash", 
     generation_config={
@@ -205,4 +205,4 @@ with tab3:
     if "rep3" in st.session_state:
         st.markdown(st.session_state.rep3)
         st.download_button("📥 Скачать ответ (.docx)", save_to_docx(st.session_state.rep3, "Letter"), file_name="Letter.docx")
-            
+    
