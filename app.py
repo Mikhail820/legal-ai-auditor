@@ -22,7 +22,7 @@ st.error(
 )
 
 # ==================================================
-# 2. GEMINI INIT (STABLE)
+# 2. GEMINI INIT (FIXED 404)
 # ==================================================
 if "GOOGLE_API_KEY" not in st.secrets:
     st.warning("⚙️ Добавьте GOOGLE_API_KEY в Secrets.")
@@ -30,8 +30,9 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
+# Исправление: используем прямое имя модели для стабильности
 model = genai.GenerativeModel(
-    "gemini-1.5-flash",
+    model_name="gemini-1.5-flash",
     generation_config={
         "temperature": 0.2,
         "top_p": 0.9,
@@ -62,6 +63,7 @@ def extract_text(file_bytes: bytes, filename: str):
         return f"Ошибка извлечения текста: {e}"
 
 def clean_markdown(text: str) -> str:
+    # Удаляем служебные символы для чистого экспорта в Word
     return re.sub(r'[*_#>`]', '', text)
 
 def save_to_docx(content: str, title: str):
@@ -86,6 +88,153 @@ def save_to_docx(content: str, title: str):
 # ==================================================
 with st.sidebar:
     st.title("🛡️ LegalAI Control")
+
+    depth = st.select_slider(
+        "Глубина анализа",
+        options=["Базовая", "Стандартная", "Глубокая"],
+        value="Стандартная"
+    )
+
+    jurisdiction = st.selectbox(
+        "Юрисдикция",
+        ["Россия / СНГ", "ЕС", "США", "Международная"]
+    )
+
+    st.caption("Модель: Gemini 1.5 Flash")
+
+    if st.button("🗑️ Сбросить всё"):
+        # Полная очистка состояния
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.cache_data.clear()
+        st.rerun()
+
+# ==================================================
+# 5. TABS
+# ==================================================
+tab1, tab2, tab3 = st.tabs(
+    ["🚀 АНАЛИЗ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТ КОНТРАГЕНТУ"]
+)
+
+# ==================================================
+# TAB 1 — АНАЛИЗ
+# ==================================================
+with tab1:
+    mode = st.radio("Источник данных", ["Файл / Фото", "Текст"], horizontal=True, key="mode1")
+
+    data = (
+        st.file_uploader("Загрузите документ", type=["pdf", "docx", "jpg", "png", "jpeg"], key="up1")
+        if mode == "Файл / Фото"
+        else st.text_area("Вставьте текст договора", height=300, key="txt1")
+    )
+
+    if st.button("🔍 Запустить аудит", type="primary", use_container_width=True):
+        if not data:
+            st.warning("Добавьте документ или текст.")
+        else:
+            with st.spinner("⚖️ Проводится юридический анализ..."):
+                try:
+                    # Проверка: это файл-изображение или текст?
+                    is_image = hasattr(data, 'type') and data.type.startswith("image")
+                    
+                    if is_image:
+                        prompt = (
+                            f"Ты ведущий юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}. "
+                            "Структура ответа: 1. Jurisdiction, 2. Verdict (%), 3. Таблица рисков, 4. Рекомендации."
+                        )
+                        response = model.generate_content([prompt, Image.open(data)])
+                    else:
+                        # Получаем текст из файла или из текстового поля
+                        if hasattr(data, 'getvalue'):
+                            text = extract_text(data.getvalue(), data.name)
+                        else:
+                            text = data
+                            
+                        if not text or "Ошибка" in text:
+                            st.error("Не удалось извлечь текст из файла. Попробуйте загрузить его как фото.")
+                            st.stop()
+
+                        full_prompt = f"Ты профессиональный юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}.\n\nТЕКСТ:\n{text}"
+                        response = model.generate_content(full_prompt)
+
+                    st.session_state.rep1 = response.text
+                except Exception as e:
+                    st.error(f"Ошибка анализа: {e}")
+
+    if "rep1" in st.session_state:
+        st.markdown(st.session_state.rep1)
+        st.download_button(
+            "📥 Скачать отчёт (.docx)",
+            save_to_docx(st.session_state.rep1, "Legal_Audit"),
+            file_name="Legal_Audit.docx",
+            key="dl1"
+        )
+
+# ==================================================
+# TAB 2 — СРАВНЕНИЕ
+# ==================================================
+with tab2:
+    c1, c2 = st.columns(2)
+    with c1:
+        a = st.file_uploader("Документ A", type=["pdf", "docx"], key="ua")
+    with c2:
+        b = st.file_uploader("Документ B", type=["pdf", "docx"], key="ub")
+
+    if st.button("⚖️ Найти отличия", use_container_width=True):
+        if not a or not b:
+            st.warning("Загрузите оба документа.")
+        else:
+            with st.spinner("Сравнение документов..."):
+                try:
+                    txt_a = extract_text(a.getvalue(), a.name)
+                    txt_b = extract_text(b.getvalue(), b.name)
+
+                    full_prompt = f"Ты юрист. Юрисдикция: {jurisdiction}. Сравни документы. Ответ в таблице: Пункт | Было | Стало | Юридический риск.\n\nДОК А:\n{txt_a}\n\nДОК Б:\n{txt_b}"
+                    res = model.generate_content(full_prompt)
+                    st.session_state.rep2 = res.text
+                except Exception as e:
+                    st.error(f"Ошибка сравнения: {e}")
+
+    if "rep2" in st.session_state:
+        st.markdown(st.session_state.rep2)
+
+# ==================================================
+# TAB 3 — ОТВЕТ
+# ==================================================
+with tab3:
+    mode3 = st.radio("Источник претензии", ["Файл / Фото", "Текст"], horizontal=True, key="mode3")
+    claim = (
+        st.file_uploader("Документ контрагента", type=["pdf", "docx", "jpg", "png"], key="up3")
+        if mode3 == "Файл / Фото"
+        else st.text_area("Текст претензии", height=250, key="txt3")
+    )
+    goal = st.text_area("Цель ответа", placeholder="Например: Отклонить претензию.")
+
+    if st.button("✍️ Сформировать ответ", type="primary", use_container_width=True):
+        if not claim:
+            st.warning("Добавьте претензию.")
+        else:
+            with st.spinner("Формируется официальный ответ..."):
+                try:
+                    is_img3 = hasattr(claim, 'type') and claim.type.startswith("image")
+                    if is_img3:
+                        response = model.generate_content([f"Напиши официальный юридический ответ. Цель: {goal}", Image.open(claim)])
+                    else:
+                        text3 = extract_text(claim.getvalue(), claim.name) if hasattr(claim, 'getvalue') else claim
+                        response = model.generate_content(f"Напиши официальный ответ. Цель: {goal}\n\nПРЕТЕНЗИЯ:\n{text3}")
+                    st.session_state.rep3 = response.text
+                except Exception as e:
+                    st.error(f"Ошибка генерации: {e}")
+
+    if "rep3" in st.session_state:
+        st.markdown(st.session_state.rep3)
+        st.download_button(
+            "📥 Скачать письмо (.docx)",
+            save_to_docx(st.session_state.rep3, "Official_Response"),
+            file_name="Official_Response.docx",
+            key="dl3"
+)
+            st.title("🛡️ LegalAI Control")
 
     depth = st.select_slider(
         "Глубина анализа",
