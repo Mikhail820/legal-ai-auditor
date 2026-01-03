@@ -1,126 +1,163 @@
+Вот чистый, оптимизированный код, который можно сразу копировать в файл `app.py`.
+
+**Требования:**
+Установите библиотеки перед запуском:
+`pip install streamlit google-generativeai PyPDF2 python-docx Pillow`
+
+```python
 import streamlit as st
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 from docx import Document
-import io
 from PIL import Image
-import re
+import io
 
-# --- 1. НАСТРОЙКИ СТРАНИЦЫ ---
-st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
+# ==================================================
+# 1. КОНФИГУРАЦИЯ СТРАНИЦЫ И МОДЕЛИ
+# ==================================================
+st.set_page_config(page_title="LegalAI Enterprise", page_icon="⚖️", layout="wide")
 
-# Дисклеймер
-st.error("⚠️ ВНИМАНИЕ: Результаты не являются юридической консультацией. Проверяйте отчеты у юристов.")
-
-# --- 2. ПОДКЛЮЧЕНИЕ К ИИ ---
-if "GOOGLE_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
-else:
-    st.error("Критическая ошибка: API ключ не найден!")
+# Настройка API
+if "GOOGLE_API_KEY" not in st.secrets:
+    st.error("Добавьте GOOGLE_API_KEY в Secrets (Streamlit Cloud или .streamlit/secrets.toml)")
     st.stop()
 
-# --- 3. ТЕХНИЧЕСКИЕ ФУНКЦИИ (С КЭШИРОВАНИЕМ) ---
-@st.cache_data
-def get_file_text(file_content, file_name):
-    # Кэшируем извлечение текста, чтобы не нагружать процессор
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+
+# Системная инструкция для фиксации роли ИИ
+SYSTEM_PROMPT = """
+Ты — профессиональный корпоративный юрист. Твоя задача:
+1. Анализировать документы на наличие скрытых юридических рисков.
+2. Сравнивать версии договоров, выделяя изменения.
+3. Составлять официальные ответы на претензии.
+Пиши четко, структурировано, используй таблицы для сравнения и списки для рисков.
+"""
+
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=SYSTEM_PROMPT
+)
+
+# ==================================================
+# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==================================================
+def extract_text(file) -> str:
+    """Извлечение текста из PDF, DOCX или TXT"""
+    fname = file.name.lower()
     try:
-        if file_name.endswith(".pdf"):
-            reader = PdfReader(io.BytesIO(file_content))
-            return "".join([p.extract_text() for p in reader.pages])
-        elif file_name.endswith(".docx"):
-            doc = Document(io.BytesIO(file_content))
+        if fname.endswith(".pdf"):
+            pdf = PdfReader(io.BytesIO(file.getvalue()))
+            return "\n".join([page.extract_text() for page in pdf.pages])
+        elif fname.endswith(".docx"):
+            doc = Document(io.BytesIO(file.getvalue()))
             return "\n".join([p.text for p in doc.paragraphs])
-        return file_content.decode('utf-8', errors='ignore')
-    except: return "Ошибка чтения."
+        elif fname.endswith(".txt"):
+            return file.getvalue().decode("utf-8")
+        return ""
+    except Exception as e:
+        return f"Ошибка при чтении файла: {e}"
 
-def create_docx_pro(report_text, title="ОТЧЕТ LEGALAI"):
+def create_docx(text: str):
+    """Конвертация Markdown-ответа в файл Word"""
     doc = Document()
-    doc.add_paragraph("ВАЖНО: Требуется проверка юристом.").bold = True
-    doc.add_heading(title, 0)
-    
-    table_rows = []
-    for line in report_text.split('\n'):
-        if line.strip().startswith('|') and line.strip().endswith('|'):
-            if re.match(r'^[ \d\.\-\|:]+$', line): continue
-            cells = [c.strip() for c in line.split('|') if c.strip()]
-            if cells: table_rows.append(cells)
-        else:
-            if table_rows:
-                table = doc.add_table(rows=0, cols=max(len(r) for r in table_rows))
-                table.style = 'Table Grid'
-                for r_data in table_rows:
-                    row_cells = table.add_row().cells
-                    for i, val in enumerate(r_data):
-                        if i < len(row_cells): row_cells[i].text = val
-                table_rows = []
-            if line.strip(): doc.add_paragraph(line)
-            
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-    return buf
+    doc.add_heading("Отчет LegalAI Enterprise", 0)
+    for line in text.split('\n'):
+        line = line.replace('**', '').replace('###', '').strip()
+        if line:
+            doc.add_paragraph(line)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
-# --- 4. УПРАВЛЕНИЕ СОСТОЯНИЕМ (СБРОС) ---
-def reset_app():
-    for key in ['full_report', 'diff_report', 'reply_final']:
-        if key in st.session_state:
-            del st.session_state[key]
+# ==================================================
+# 3. ИНТЕРФЕЙС
+# ==================================================
+st.title("⚖️ LegalAI Enterprise Pro")
+st.caption("Интеллектуальный помощник для работы с юридическими документами")
 
-# --- 5. ИНТЕРФЕЙС ---
-st.sidebar.title("Управление")
-depth = st.sidebar.select_slider("Глубина анализа:", options=["Базовая", "Стандартная", "Глубокая"], value="Глубокая")
-if st.sidebar.button("🗑️ Очистить все результаты"):
-    reset_app()
-    st.rerun()
+with st.sidebar:
+    st.header("Настройки")
+    jurisdiction = st.selectbox("Юрисдикция", ["РФ", "Казахстан", "Узбекистан", "Международное право"])
+    depth = st.select_slider("Глубина анализа", ["Базовая", "Стандартная", "Детальная"])
+    if st.button("🗑️ Очистить кэш"):
+        st.session_state.clear()
+        st.rerun()
 
-tab1, tab2, tab3 = st.tabs(["🚀 АНАЛИЗ", "🔍 СРАВНЕНИЕ", "✉️ ГЕНЕРАТОР ОТВЕТА"])
+tabs = st.tabs(["🔍 Анализ договора", "🔄 Сравнение версий", "✉️ Ответ на претензию"])
 
 # --- ВКЛАДКА 1: АНАЛИЗ ---
-with tab1:
-    u_file = st.file_uploader("Загрузите договор", type=['pdf','docx','jpg','png','jpeg'], key="anal_file")
-    if st.button("🚀 ЗАПУСТИТЬ ПОЛНУЮ ПРОВЕРКУ", use_container_width=True, type="primary"):
-        if u_file:
-            with st.spinner("Идет анализ..."):
-                if u_file.type.startswith('image'):
-                    content = Image.open(u_file)
+with tabs[0]:
+    st.subheader("Поиск рисков и аудит")
+    up_file = st.file_uploader("Загрузите договор (PDF, DOCX, JPG)", type=["pdf", "docx", "png", "jpg"])
+    
+    if st.button("Начать юридический аудит", type="primary"):
+        if up_file:
+            with st.spinner("ИИ анализирует документ..."):
+                if up_file.type.startswith("image"):
+                    response = model.generate_content([f"Проведи детальный юридический аудит. Юрисдикция: {jurisdiction}", Image.open(up_file)])
                 else:
-                    content = get_file_text(u_file.read(), u_file.name)
-                
-                sys_prompt = f"ТЫ ЮРИСТ. Глубина: {depth}. Структура: 1. Jurisdiction 2. Verdict (%) 3. Risk Table | Пункт | Риск | Правка | 4. Key Findings."
-                res = model.generate_content([sys_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{sys_prompt}\n\n{content}")
-                st.session_state.full_report = res.text
+                    text = extract_text(up_file)
+                    response = model.generate_content(f"Проведи юридический анализ текста. Глубина: {depth}. Юрисдикция: {jurisdiction}.\n\nТекст:\n{text}")
+                st.session_state.audit = response.text
+        else:
+            st.warning("Пожалуйста, загрузите файл.")
 
-    if 'full_report' in st.session_state:
-        st.markdown(st.session_state.full_report)
-        st.download_button("📥 СКАЧАТЬ ОТЧЕТ", data=create_docx_pro(st.session_state.full_report), file_name="Legal_Report.docx")
+    if "audit" in st.session_state:
+        st.markdown(st.session_state.audit)
+        st.download_button("📥 Скачать в Word", create_docx(st.session_state.audit), "Audit_Report.docx")
 
 # --- ВКЛАДКА 2: СРАВНЕНИЕ ---
-with tab2:
-    c1, c2 = st.columns(2)
-    old_f = c1.file_uploader("Оригинал", type=['pdf','docx'], key="f_old")
-    new_f = c2.file_uploader("Новая версия", type=['pdf','docx'], key="f_new")
-    if st.button("⚖️ СРАВНИТЬ"):
-        if old_f and new_f:
-            with st.spinner("Сравниваю..."):
-                t1, t2 = get_file_text(old_f.read(), old_f.name), get_file_text(new_f.read(), new_f.name)
-                res = model.generate_content(f"Найди отличия. Таблица: Пункт | Было | Стало | Риск.\n\nТекст 1: {t1[:10000]}\n\nТекст 2: {t2[:10000]}")
-                st.session_state.diff_report = res.text
-    if 'diff_report' in st.session_state:
-        st.markdown(st.session_state.diff_report)
+with tabs[1]:
+    st.subheader("Сравнение правок сторон")
+    col1, col2 = st.columns(2)
+    with col1: file1 = st.file_uploader("Оригинал (Ваш)", type=["pdf", "docx"])
+    with col2: file2 = st.file_uploader("Версия контрагента", type=["pdf", "docx"])
+    
+    if st.button("Сравнить и найти отличия"):
+        if file1 and file2:
+            with st.spinner("Сравнение условий..."):
+                t1, t2 = extract_text(file1), extract_text(file2)
+                prompt = "Сравни два текста договора. Выведи таблицу: Пункт | Оригинал | Изменения | Риск для нас."
+                response = model.generate_content(f"{prompt}\n\nТекст 1:\n{t1}\n\nТекст 2:\n{t2}")
+                st.session_state.diff = response.text
+        else:
+            st.warning("Загрузите оба файла.")
 
-# --- ВКЛАДКА 3: ГЕНЕРАТОР ОТВЕТА ---
-with tab3:
-    doc_in = st.file_uploader("Документ контрагента", type=['pdf','docx','jpg','png'], key="f_gen")
-    user_goal = st.text_area("Ваша цель (например: отклонить претензию):")
-    if st.button("✍️ СОСТАВИТЬ ПИСЬМО"):
-        if doc_in:
-            with st.spinner("Пишу письмо..."):
-                content = Image.open(doc_in) if doc_in.type.startswith('image') else get_file_text(doc_in.read(), doc_in.name)
-                reply_prompt = f"Напиши официальный ответ. Цель: {user_goal}. Стиль: Юридический, ссылки на ГК РФ."
-                response = model.generate_content([reply_prompt, content]) if isinstance(content, Image.Image) else model.generate_content(f"{reply_prompt}\n\n{content}")
-                st.session_state.reply_final = response.text
-    if 'reply_final' in st.session_state:
-        st.markdown(st.session_state.reply_final)
-        st.download_button("📥 СКАЧАТЬ ПИСЬМО", data=create_docx_pro(st.session_state.reply_final, "ОТВЕТ"), file_name="Letter.docx")
-        
+    if "diff" in st.session_state:
+        st.markdown(st.session_state.diff)
+
+# --- ВКЛАДКА 3: ОТВЕТ ---
+with tabs[2]:
+    st.subheader("Генератор ответов")
+    claim = st.text_area("Вставьте текст претензии или письма от контрагента", height=200)
+    goal = st.text_input("Какую цель преследуем?", placeholder="Например: Аргументированно отказать в выплате штрафа")
+    
+    if st.button("Сформировать проект ответа"):
+        if claim:
+            with st.spinner("Пишем официальное письмо..."):
+                prompt = f"Напиши официальный юридический ответ. Цель: {goal}. Юрисдикция: {jurisdiction}.\n\nПретензия:\n{claim}"
+                response = model.generate_content(prompt)
+                st.session_state.letter = response.text
+        else:
+            st.warning("Введите текст претензии.")
+
+    if "letter" in st.session_state:
+        st.markdown("### Черновик ответа:")
+        st.info(st.session_state.letter)
+        st.download_button("📥 Скачать ответ (.docx)", create_docx(st.session_state.letter), "Response_Letter.docx")
+
+# Дисклеймер в футере
+st.divider()
+st.caption("⚠️ ВНИМАНИЕ: Данный инструмент использует ИИ. Результаты не являются юридической консультацией. Проверьте документ у юриста.")
+```
+
+### Как настроить ключи:
+Если вы запускаете локально:
+1. Создайте папку `.streamlit` в папке с проектом.
+2. Создайте в ней файл `secrets.toml`.
+3. Напишите там: `GOOGLE_API_KEY = "ваш_ключ_от_gemini"`.
+
+Если вы запускаете на Streamlit Cloud:
+1. Зайдите в настройки вашего приложения (Settings -> Secrets).
+2. Вставьте туда `GOOGLE_API_KEY = "ваш_ключ_от_gemini"`.
