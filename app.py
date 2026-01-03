@@ -1,48 +1,42 @@
 import streamlit as st
 import requests
-import json
 
-st.title("Проверка связи с Gemini API")
+st.title("🕵️ Сканер доступных моделей")
 
-# 1. Получаем ключ
 api_key = st.secrets.get("GOOGLE_API_KEY")
 
 if not api_key:
-    st.error("🔑 Ошибка: Вставь GOOGLE_API_KEY в Secrets (Settings -> Secrets)")
+    st.error("Ключ не найден в Secrets!")
     st.stop()
 
-# 2. Формируем ПРЯМОЙ запрос к стабильной версии v1
-# Это исключает ошибку 404, так как мы не используем v1beta
-url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+# Эндпоинт для получения списка моделей
+url = f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
 
-headers = {'Content-Type': 'application/json'}
-payload = {
-    "contents": [
-        {
-            "parts": [{"text": "Привет! Если ты меня слышишь, ответь: 'Связь установлена!'"}]
-        }
-    ]
-}
-
-if st.button("Проверить соединение"):
-    with st.spinner("Отправка прямого запроса на v1..."):
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(payload))
+if st.button("Найти рабочую модель"):
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            models_data = response.json()
+            st.success("Список получен!")
             
-            if response.status_code == 200:
-                # Извлекаем текст из JSON ответа Google
-                result = response.json()
-                answer = result['candidates'][0]['content']['parts'][0]['text']
-                st.success("✅ Ответ получен!")
-                st.balloons()
-                st.write(f"**ИИ говорит:** {answer}")
-            elif response.status_code == 429:
-                st.warning("⚠️ Ошибка 429: Лимит запросов исчерпан. Подожди 60 секунд.")
+            # Выводим только те модели, которые поддерживают генерацию текста
+            available_models = []
+            for m in models_data.get('models', []):
+                if 'generateContent' in m.get('supportedGenerationMethods', []):
+                    # Убираем префикс 'models/', оставляем только имя
+                    name = m['name'].replace('models/', '')
+                    available_models.append(name)
+            
+            if available_models:
+                st.write("### Твои рабочие модели:")
+                st.info("Скопируй одну из них и напиши мне:")
+                for name in available_models:
+                    st.code(name)
             else:
-                st.error(f"❌ Ошибка {response.status_code}")
-                st.json(response.json()) # Показываем полную ошибку для диагностики
+                st.warning("Ключ работает, но нет доступных моделей для генерации.")
+        else:
+            st.error(f"Ошибка {response.status_code}")
+            st.json(response.json())
+    except Exception as e:
+        st.error(f"Ошибка связи: {e}")
                 
-        except Exception as e:
-            st.error(f"Критическая ошибка: {e}")
-
-st.info("Если этот тест пройдет — мы сможем нанизывать функции на этот каркас.")
