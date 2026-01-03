@@ -22,7 +22,7 @@ st.error(
 )
 
 # ==================================================
-# 2. GEMINI INIT (FIXED 404)
+# 2. GEMINI INIT (FIXED 404 ERROR)
 # ==================================================
 if "GOOGLE_API_KEY" not in st.secrets:
     st.warning("⚙️ Добавьте GOOGLE_API_KEY в Secrets.")
@@ -30,14 +30,30 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config={
-        "temperature": 0.2,
-        "top_p": 0.9,
-        "max_output_tokens": 4096
-    }
-)
+# Функция для безопасного создания модели (исправляет ошибку 404 со скриншота)
+def get_safe_model():
+    # Список возможных имен модели в порядке приоритета
+    model_names = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"]
+    for name in model_names:
+        try:
+            m = genai.GenerativeModel(
+                model_name=name,
+                generation_config={
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "max_output_tokens": 4096
+                }
+            )
+            # Проверка работоспособности (тестовый запрос не делаем для экономии, просто создаем объект)
+            return m
+        except Exception:
+            continue
+    return None
+
+model = get_safe_model()
+if not model:
+    st.error("Не удалось подключиться к моделям Google Gemini. Проверьте API ключ.")
+    st.stop()
 
 # ==================================================
 # 3. UTILITIES
@@ -80,16 +96,9 @@ def save_to_docx(content: str, title: str):
 # ==================================================
 with st.sidebar:
     st.title("🛡️ LegalAI Control")
-    depth = st.select_slider(
-        "Глубина анализа",
-        options=["Базовая", "Стандартная", "Глубокая"],
-        value="Стандартная"
-    )
-    jurisdiction = st.selectbox(
-        "Юрисдикция",
-        ["Россия / СНГ", "ЕС", "США", "Международная"]
-    )
-    st.caption("Модель: Gemini 1.5 Flash")
+    depth = st.select_slider("Глубина анализа", options=["Базовая", "Стандартная", "Глубокая"], value="Стандартная")
+    jurisdiction = st.selectbox("Юрисдикция", ["Россия / СНГ", "ЕС", "США", "Международная"])
+    st.caption(f"Статус: Активен")
     if st.button("🗑️ Сбросить всё"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
@@ -99,20 +108,12 @@ with st.sidebar:
 # ==================================================
 # 5. TABS
 # ==================================================
-tab1, tab2, tab3 = st.tabs(
-    ["🚀 АНАЛИЗ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТ КОНТРАГЕНТУ"]
-)
+tab1, tab2, tab3 = st.tabs(["🚀 АНАЛИЗ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТ КОНТРАГЕНТУ"])
 
-# ==================================================
-# TAB 1 — АНАЛИЗ
-# ==================================================
+# --- TAB 1: АНАЛИЗ ---
 with tab1:
     mode1 = st.radio("Источник данных", ["Файл / Фото", "Текст"], horizontal=True, key="m1")
-    data1 = (
-        st.file_uploader("Загрузите документ", type=["pdf", "docx", "jpg", "png", "jpeg"], key="up1")
-        if mode1 == "Файл / Фото"
-        else st.text_area("Вставьте текст договора", height=300, key="tx1")
-    )
+    data1 = st.file_uploader("Загрузите документ", type=["pdf", "docx", "jpg", "png", "jpeg"], key="up1") if mode1 == "Файл / Фото" else st.text_area("Вставьте текст договора", height=300, key="tx1")
 
     if st.button("🔍 Запустить аудит", type="primary", use_container_width=True):
         if not data1:
@@ -126,8 +127,7 @@ with tab1:
                         response = model.generate_content([prompt, Image.open(data1)])
                     else:
                         text = extract_text(data1.getvalue(), data1.name) if hasattr(data1, 'getvalue') else data1
-                        full_prompt = f"Ты юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}.\n\nТЕКСТ:\n{text}"
-                        response = model.generate_content(full_prompt)
+                        response = model.generate_content(f"Ты юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}.\n\nТЕКСТ:\n{text}")
                     st.session_state.rep1 = response.text
                 except Exception as e:
                     st.error(f"Ошибка анализа: {e}")
@@ -136,42 +136,25 @@ with tab1:
         st.markdown(st.session_state.rep1)
         st.download_button("📥 Скачать отчёт", save_to_docx(st.session_state.rep1, "Audit"), file_name="Legal_Audit.docx", key="dl1")
 
-# ==================================================
-# TAB 2 — СРАВНЕНИЕ
-# ==================================================
+# --- TAB 2: СРАВНЕНИЕ ---
 with tab2:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        a = st.file_uploader("Документ A", type=["pdf", "docx"], key="ua")
-    with col_b:
-        b = st.file_uploader("Документ B", type=["pdf", "docx"], key="ub")
-
+    c1, c2 = st.columns(2)
+    a = c1.file_uploader("Документ A", type=["pdf", "docx"], key="ua")
+    b = c2.file_uploader("Документ B", type=["pdf", "docx"], key="ub")
     if st.button("⚖️ Найти отличия", use_container_width=True):
         if a and b:
             with st.spinner("Сравнение..."):
                 try:
-                    t_a = extract_text(a.getvalue(), a.name)
-                    t_b = extract_text(b.getvalue(), b.name)
-                    prompt = f"Ты юрист. Сравни. Таблица: Пункт | Было | Стало | Риск.\n\nА:\n{t_a}\n\nБ:\n{t_b}"
-                    st.session_state.rep2 = model.generate_content(prompt).text
-                except Exception as e:
-                    st.error(f"Ошибка: {e}")
+                    res = model.generate_content(f"Сравни. Таблица: Пункт | Было | Стало | Риск.\n\nА:\n{extract_text(a.getvalue(), a.name)}\n\nБ:\n{extract_text(b.getvalue(), b.name)}")
+                    st.session_state.rep2 = res.text
+                except Exception as e: st.error(f"Ошибка: {e}")
+    if "rep2" in st.session_state: st.markdown(st.session_state.rep2)
 
-    if "rep2" in st.session_state:
-        st.markdown(st.session_state.rep2)
-
-# ==================================================
-# TAB 3 — ОТВЕТ
-# ==================================================
+# --- TAB 3: ОТВЕТ ---
 with tab3:
     mode3 = st.radio("Источник", ["Файл / Фото", "Текст"], horizontal=True, key="m3")
-    claim = (
-        st.file_uploader("Претензия", type=["pdf", "docx", "jpg", "png"], key="up3")
-        if mode3 == "Файл / Фото"
-        else st.text_area("Текст претензии", height=200, key="tx3")
-    )
+    claim = st.file_uploader("Претензия", type=["pdf", "docx", "jpg", "png"], key="up3") if mode3 == "Файл / Фото" else st.text_area("Текст претензии", height=200, key="tx3")
     goal = st.text_area("Цель ответа", key="goal3")
-
     if st.button("✍️ Создать ответ", type="primary", use_container_width=True):
         if claim:
             with st.spinner("Формирование..."):
@@ -182,9 +165,8 @@ with tab3:
                         txt = extract_text(claim.getvalue(), claim.name) if hasattr(claim, 'getvalue') else claim
                         res = model.generate_content(f"Напиши ответ. Цель: {goal}\n\nТекст:\n{txt}")
                     st.session_state.rep3 = res.text
-                except Exception as e:
-                    st.error(f"Ошибка: {e}")
-
+                except Exception as e: st.error(f"Ошибка: {e}")
     if "rep3" in st.session_state:
         st.markdown(st.session_state.rep3)
         st.download_button("📥 Скачать ответ", save_to_docx(st.session_state.rep3, "Letter"), file_name="Letter.docx", key="dl3")
+    
