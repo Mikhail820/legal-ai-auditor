@@ -9,11 +9,7 @@ import re
 # ==================================================
 # 1. КОНФИГУРАЦИЯ
 # ==================================================
-st.set_page_config(
-    page_title="LegalAI Enterprise Pro",
-    page_icon="⚖️",
-    layout="wide"
-)
+st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
 
 st.error(
     "⚠️ ЮРИДИЧЕСКИЙ ДИСКЛЕЙМЕР: "
@@ -22,7 +18,7 @@ st.error(
 )
 
 # ==================================================
-# 2. GEMINI INIT (FIXED 404 ERROR)
+# 2. УМНЫЙ ИНИТ МОДЕЛИ (УСТРАНЯЕМ 404)
 # ==================================================
 if "GOOGLE_API_KEY" not in st.secrets:
     st.warning("⚙️ Добавьте GOOGLE_API_KEY в Secrets.")
@@ -30,143 +26,110 @@ if "GOOGLE_API_KEY" not in st.secrets:
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# Функция для безопасного создания модели (исправляет ошибку 404 со скриншота)
-def get_safe_model():
-    # Список возможных имен модели в порядке приоритета
-    model_names = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"]
-    for name in model_names:
+def init_model():
+    """Перебирает имена моделей, чтобы избежать ошибки 404"""
+    # Список имен от самых новых к стандартным
+    variants = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "models/gemini-1.5-flash"]
+    for v in variants:
         try:
-            m = genai.GenerativeModel(
-                model_name=name,
-                generation_config={
-                    "temperature": 0.2,
-                    "top_p": 0.9,
-                    "max_output_tokens": 4096
-                }
-            )
-            # Проверка работоспособности (тестовый запрос не делаем для экономии, просто создаем объект)
+            m = genai.GenerativeModel(model_name=v)
+            # Тестовый микро-вызов для проверки доступности имени
+            m.generate_content("test", generation_config={"max_output_tokens": 1})
             return m
         except Exception:
             continue
-    return None
+    # Если ничего не подошло, пробуем старый добрый Pro
+    return genai.GenerativeModel("gemini-pro")
 
-model = get_safe_model()
-if not model:
-    st.error("Не удалось подключиться к моделям Google Gemini. Проверьте API ключ.")
-    st.stop()
+model = init_model()
 
 # ==================================================
-# 3. UTILITIES
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==================================================
-@st.cache_data(show_spinner=False, max_entries=10)
-def extract_text(file_bytes: bytes, filename: str):
-    name = filename.lower()
+@st.cache_data(show_spinner=False)
+def extract_text(file_bytes, filename):
     try:
-        if name.endswith(".pdf"):
+        if filename.lower().endswith(".pdf"):
             reader = PdfReader(io.BytesIO(file_bytes))
             return "".join(p.extract_text() or "" for p in reader.pages)[:30000]
-        if name.endswith(".docx"):
+        if filename.lower().endswith(".docx"):
             doc = Document(io.BytesIO(file_bytes))
             return "\n".join(p.text for p in doc.paragraphs)[:30000]
-        if name.endswith((".txt", ".md")):
-            return file_bytes.decode("utf-8", errors="ignore")[:30000]
-        return None
+        return file_bytes.decode("utf-8", errors="ignore")[:30000]
     except Exception as e:
-        return f"Ошибка извлечения текста: {e}"
+        return f"Ошибка: {e}"
 
-def clean_markdown(text: str) -> str:
-    return re.sub(r'[*_#>`]', '', text)
-
-def save_to_docx(content: str, title: str):
+def save_to_docx(content, title):
     doc = Document()
     doc.add_heading(title, 0)
-    p = doc.add_paragraph()
-    run = p.add_run("Сформировано LegalAI Enterprise. Требуется проверка юриста.")
-    run.bold = True
-    for line in clean_markdown(content).split("\n"):
-        if line.strip():
-            doc.add_paragraph(line)
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+    clean = re.sub(r'[*_#>`]', '', content)
+    for line in clean.split("\n"):
+        if line.strip(): doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
 
 # ==================================================
-# 4. SIDEBAR
+# 4. ИНТЕРФЕЙС
 # ==================================================
 with st.sidebar:
     st.title("🛡️ LegalAI Control")
-    depth = st.select_slider("Глубина анализа", options=["Базовая", "Стандартная", "Глубокая"], value="Стандартная")
-    jurisdiction = st.selectbox("Юрисдикция", ["Россия / СНГ", "ЕС", "США", "Международная"])
-    st.caption(f"Статус: Активен")
-    if st.button("🗑️ Сбросить всё"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+    depth = st.select_slider("Глубина", ["Базовая", "Стандартная", "Глубокая"], "Стандартная")
+    juris = st.selectbox("Юрисдикция", ["Россия / СНГ", "ЕС", "США"])
+    if st.button("🗑️ Сброс"):
+        st.session_state.clear()
         st.cache_data.clear()
         st.rerun()
 
-# ==================================================
-# 5. TABS
-# ==================================================
-tab1, tab2, tab3 = st.tabs(["🚀 АНАЛИЗ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТ КОНТРАГЕНТУ"])
+t1, t2, t3 = st.tabs(["🚀 АНАЛИЗ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТ"])
 
-# --- TAB 1: АНАЛИЗ ---
-with tab1:
-    mode1 = st.radio("Источник данных", ["Файл / Фото", "Текст"], horizontal=True, key="m1")
-    data1 = st.file_uploader("Загрузите документ", type=["pdf", "docx", "jpg", "png", "jpeg"], key="up1") if mode1 == "Файл / Фото" else st.text_area("Вставьте текст договора", height=300, key="tx1")
-
+# --- TAB 1 ---
+with t1:
+    m1 = st.radio("Источник", ["Файл / Фото", "Текст"], horizontal=True, key="m1")
+    d1 = st.file_uploader("Документ", type=["pdf","docx","jpg","png","jpeg"], key="u1") if m1=="Файл / Фото" else st.text_area("Текст", height=300, key="t1")
+    
     if st.button("🔍 Запустить аудит", type="primary", use_container_width=True):
-        if not data1:
-            st.warning("Добавьте документ или текст.")
-        else:
-            with st.spinner("⚖️ Проводится юридический анализ..."):
+        if d1:
+            with st.spinner("⚖️ ИИ анализирует..."):
                 try:
-                    is_img = hasattr(data1, 'type') and data1.type.startswith("image")
-                    if is_img:
-                        prompt = f"Ты юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}. Структура: Jurisdiction, Verdict (%), Таблица рисков, Рекомендации."
-                        response = model.generate_content([prompt, Image.open(data1)])
+                    if hasattr(d1, 'type') and d1.type.startswith("image"):
+                        res = model.generate_content([f"Юрист. Глубина: {depth}. Юрисдикция: {juris}. Найди риски.", Image.open(d1)])
                     else:
-                        text = extract_text(data1.getvalue(), data1.name) if hasattr(data1, 'getvalue') else data1
-                        response = model.generate_content(f"Ты юрист. Юрисдикция: {jurisdiction}. Глубина: {depth}.\n\nТЕКСТ:\n{text}")
-                    st.session_state.rep1 = response.text
+                        txt = extract_text(d1.getvalue(), d1.name) if hasattr(d1, 'name') else d1
+                        res = model.generate_content(f"Юрист. Анализ текста: {txt}")
+                    st.session_state.rep1 = res.text
                 except Exception as e:
-                    st.error(f"Ошибка анализа: {e}")
+                    st.error(f"Ошибка API: {e}")
 
     if "rep1" in st.session_state:
         st.markdown(st.session_state.rep1)
-        st.download_button("📥 Скачать отчёт", save_to_docx(st.session_state.rep1, "Audit"), file_name="Legal_Audit.docx", key="dl1")
+        st.download_button("📥 Скачать (.docx)", save_to_docx(st.session_state.rep1, "Audit"), "Audit.docx")
 
-# --- TAB 2: СРАВНЕНИЕ ---
-with tab2:
-    c1, c2 = st.columns(2)
-    a = c1.file_uploader("Документ A", type=["pdf", "docx"], key="ua")
-    b = c2.file_uploader("Документ B", type=["pdf", "docx"], key="ub")
-    if st.button("⚖️ Найти отличия", use_container_width=True):
-        if a and b:
-            with st.spinner("Сравнение..."):
-                try:
-                    res = model.generate_content(f"Сравни. Таблица: Пункт | Было | Стало | Риск.\n\nА:\n{extract_text(a.getvalue(), a.name)}\n\nБ:\n{extract_text(b.getvalue(), b.name)}")
-                    st.session_state.rep2 = res.text
-                except Exception as e: st.error(f"Ошибка: {e}")
+# --- TAB 2 ---
+with t2:
+    ca, cb = st.columns(2)
+    fa = ca.file_uploader("Документ A", type=["pdf","docx"], key="fa")
+    fb = cb.file_uploader("Документ B", type=["pdf","docx"], key="fb")
+    if st.button("⚖️ Сравнить", use_container_width=True):
+        if fa and fb:
+            with st.spinner("Сверяю..."):
+                t_a, t_b = extract_text(fa.getvalue(), fa.name), extract_text(fb.getvalue(), fb.name)
+                st.session_state.rep2 = model.generate_content(f"Сравни. Таблица: Пункт | А | Б | Риск.\n\nА:{t_a}\n\nБ:{t_b}").text
     if "rep2" in st.session_state: st.markdown(st.session_state.rep2)
 
-# --- TAB 3: ОТВЕТ ---
-with tab3:
-    mode3 = st.radio("Источник", ["Файл / Фото", "Текст"], horizontal=True, key="m3")
-    claim = st.file_uploader("Претензия", type=["pdf", "docx", "jpg", "png"], key="up3") if mode3 == "Файл / Фото" else st.text_area("Текст претензии", height=200, key="tx3")
-    goal = st.text_area("Цель ответа", key="goal3")
+# --- TAB 3 ---
+with t3:
+    m3 = st.radio("Источник", ["Файл / Фото", "Текст"], horizontal=True, key="m3")
+    cl = st.file_uploader("Претензия", type=["pdf","docx","jpg","png"], key="u3") if m3=="Файл / Фото" else st.text_area("Текст", key="t3")
+    gl = st.text_area("Цель ответа", key="g3")
     if st.button("✍️ Создать ответ", type="primary", use_container_width=True):
-        if claim:
-            with st.spinner("Формирование..."):
-                try:
-                    if hasattr(claim, 'type') and claim.type.startswith("image"):
-                        res = model.generate_content([f"Ответ. Цель: {goal}", Image.open(claim)])
-                    else:
-                        txt = extract_text(claim.getvalue(), claim.name) if hasattr(claim, 'getvalue') else claim
-                        res = model.generate_content(f"Напиши ответ. Цель: {goal}\n\nТекст:\n{txt}")
-                    st.session_state.rep3 = res.text
-                except Exception as e: st.error(f"Ошибка: {e}")
-    if "rep3" in st.session_state:
-        st.markdown(st.session_state.rep3)
-        st.download_button("📥 Скачать ответ", save_to_docx(st.session_state.rep3, "Letter"), file_name="Letter.docx", key="dl3")
-    
+        if cl:
+            with st.spinner("Пишу..."):
+                if hasattr(cl, 'type') and cl.type.startswith("image"):
+                    r = model.generate_content([f"Ответ. Цель: {gl}", Image.open(cl)])
+                else:
+                    t = extract_text(cl.getvalue(), cl.name) if hasattr(cl, 'name') else cl
+                    r = model.generate_content(f"Напиши ответ. Цель: {gl}. Текст: {t}")
+                st.session_state.rep3 = r.text
+    if "rep3" in st.session_state: st.markdown(st.session_state.rep3)
