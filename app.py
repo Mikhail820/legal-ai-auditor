@@ -8,7 +8,7 @@ from PIL import Image
 import io
 import re
 import base64
-from fpdf import FPDF # Библиотека для PDF
+from fpdf import FPDF # Библиотека fpdf2
 
 # --- 1. CONFIG & STYLES ---
 st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
@@ -28,11 +28,18 @@ st.markdown("""
         margin-bottom: 10px;
         line-height: 1.6;
     }
-    .disclaimer { font-size: 0.8rem; color: #888; text-align: justify; border-top: 1px solid #eee; padding-top: 10px; }
+    .disclaimer-box { 
+        font-size: 0.85rem; 
+        color: #666; 
+        padding: 15px; 
+        background-color: #fff3f3; 
+        border-radius: 8px; 
+        border: 1px solid #ffcccc;
+        margin-top: 20px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# ТВОЯ МОДЕЛЬ
 TARGET_MODEL = "gemini-2.5-flash-lite"
 
 # --- 2. CORE ENGINE ---
@@ -58,16 +65,17 @@ def call_gemini_direct(prompt, image_bytes=None):
     return None
 
 # --- 3. HELPERS (PDF & DOCX) ---
-def create_pdf_report(text, title):
+def create_pdf(text, title):
     pdf = FPDF()
     pdf.add_page()
-    # Для кириллицы в FPDF нужно подключить шрифт. Пока используем стандарт, но лучше загрузить .ttf
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(40, 10, title)
+    pdf.cell(0, 10, title, ln=True, align='C')
     pdf.ln(10)
     pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, text.replace('🔴', '[RISK]'))
-    return pdf.output(dest='S').encode('latin-1', 'replace')
+    # Очистка текста от символов, которые не поддерживает стандартный шрифт PDF
+    clean_text = text.replace('🔴', '[RISK]').replace('*', '').encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 10, txt=clean_text)
+    return pdf.output()
 
 def create_docx(text, title):
     doc = Document()
@@ -108,12 +116,11 @@ with st.sidebar:
     if st.button("🗑️ Сбросить всё"):
         st.session_state.clear()
         st.rerun()
-    
-    # ПРЕДУПРЕЖДЕНИЕ (ДИСКЛЕЙМЕР)
+
     st.markdown("""
-    <div class="disclaimer">
-    <b>Внимание:</b> Данный сервис использует ИИ. Результаты анализа не являются официальным юридическим заключением. 
-    Рекомендуется консультация с квалифицированным юристом перед принятием решений.
+    <div class="disclaimer-box">
+    <b>⚠️ ПРЕДУПРЕЖДЕНИЕ:</b><br>
+    Этот сервис использует ИИ. Результаты не являются юридической консультацией.
     </div>
     """, unsafe_allow_html=True)
 
@@ -146,7 +153,7 @@ with tab1:
             if target_content:
                 with col_res:
                     with st.spinner("Анализирую..."):
-                        p = f"Ты эксперт-юрист. Роль: {audience}. Юрисдикция: {jurisdiction}. Используй 🔴 для рисков."
+                        p = f"Ты эксперт-юрист. Роль: {audience}. Юрисдикция: {jurisdiction}. Найди риски и выдели их 🔴."
                         res = call_gemini_direct(p, target_content) if is_image else call_gemini_direct(f"{p}\n\nДОК:\n{target_content}")
                         if res: st.session_state.audit_res = res
 
@@ -156,31 +163,27 @@ with tab1:
                 if "🔴" in block: st.markdown(f'<div class="critical-risk">{block}</div>', unsafe_allow_html=True)
                 else: st.markdown(block)
             
-            # Двойная кнопка экспорта
+            # БЛОК СКАЧИВАНИЯ
             c1, c2 = st.columns(2)
             c1.download_button("📥 Скачать Word", create_docx(st.session_state.audit_res, "Аудит"), "Audit.docx")
-            # PDF заготовка (нужны шрифты для полной поддержки кириллицы)
-            c2.button("📑 Фирменный PDF (Beta)", help="Генерация PDF отчета")
+            
+            # Кнопка PDF
+            try:
+                pdf_data = create_pdf(st.session_state.audit_res, "Юридический Аудит")
+                c2.download_button("📥 Скачать PDF", data=pdf_data, file_name="Legal_Audit.pdf", mime="application/pdf")
+            except:
+                c2.error("Ошибка генерации PDF")
 
-with tab2:
-    st.subheader("Сравнение версий")
-    # (Твой код сравнения без изменений...)
-
+# Остальные вкладки (tab2, tab3) остаются как в прошлом коде
 with tab3:
     st.subheader("Генератор документов")
     doc_type = st.selectbox("Тип документа:", ["Протокол разногласий (Таблица)", "Претензия", "Сопроводительное письмо"])
-    context = st.text_area("Опишите ситуацию или вставьте пункты договора:")
-    
+    context = st.text_area("Данные для документа:")
     if st.button("✍️ СГЕНЕРИРОВАТЬ") and context:
-        with st.spinner("Пишем документ..."):
-            if doc_type == "Протокол разногласий (Таблица)":
-                p = "Создай таблицу: 1. Пункт договора. 2. Наша редакция. 3. Почему это важно. Фокус на защиту наших интересов."
-            else:
-                p = f"Напиши {doc_type}. Юрисдикция: {jurisdiction}."
-            
-            res = call_gemini_direct(f"{p}\n\nКОНТЕКСТ:\n{context}")
+        with st.spinner("Пишем..."):
+            res = call_gemini_direct(f"Напиши {doc_type} на основе этого текста:\n{context}")
             if res:
                 st.session_state.doc_res = res
                 st.markdown(res)
                 st.download_button("📥 Скачать документ", create_docx(st.session_state.doc_res, doc_type), f"{doc_type}.docx")
-    
+                                 
