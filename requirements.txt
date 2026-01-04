@@ -4,5 +4,4 @@ PyPDF2
 python-docx
 beautifulsoup4
 Pillow
-fpdf2
 
