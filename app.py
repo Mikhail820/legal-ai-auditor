@@ -1,146 +1,148 @@
 import streamlit as st
 import requests
-import re
-import base64
+import json
 from PyPDF2 import PdfReader
 from docx import Document
-from bs4 import BeautifulSoup
+from PIL import Image
+import io
+import re
+import os
+import base64
 
-# --- 1. НАСТРОЙКИ ---
-st.set_page_config(page_title="LegalAI Pro 2.0", layout="wide", page_icon="⚖️")
+# --- 1. CONFIG & STYLES ---
+st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
 
-def reset_app():
-    for key in st.session_state.keys():
-        del st.session_state[key]
-    st.rerun()
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
+    .stDownloadButton>button { width: 100%; border-radius: 8px; }
+    .main-header { font-size: 2.2rem; color: #FF4B4B; text-align: center; margin-bottom: 1rem; }
+    </style>
+    """, unsafe_allow_html=True)
 
-def anonymize_text(text):
-    patterns = {
-        r'\b\d{4}\s\d{6}\b': '[ПАСПОРТ]',
-        r'\b\+?\d{1,3}[-.\s]?\(?\d{1,4}?\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}\b': '[ТЕЛЕФОН]',
-        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b': '[EMAIL]',
-    }
-    for pattern, replacement in patterns.items():
-        text = re.sub(pattern, replacement, text)
-    return text
+TARGET_MODEL = "gemini-2.5-flash-lite"
 
-# --- 2. API LOGIC (ПРЯМОЙ POST ЗАПРОС) ---
-def call_gemini(prompt, content, is_img=False):
-    # Только один ключ, без пула
+# --- 2. CORE ENGINE ---
+def call_gemini_direct(prompt, image_bytes=None):
+    api_key = st.secrets.get("GOOGLE_API_KEY")
+    url = f"https://generativelanguage.googleapis.com/v1/models/{TARGET_MODEL}:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    
+    if image_bytes:
+        img_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]}]}
+    else:
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
     try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-    except:
-        return "❌ Ошибка: Ключ 'GOOGLE_API_KEY' не найден в Secrets."
-
-    # Прямой URL к Gemini 2.0 Flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={api_key}"
-    
-    if not is_img:
-        content = anonymize_text(content)
-    
-    parts = [{"text": f"{prompt}\n\nCONTENT:\n{content}"}]
-    if is_img:
-        parts = [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(content).decode()}}]
-    
-    payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4000}
-    }
-    
-    try:
-        response = requests.post(url, json=payload, timeout=30)
-        res_json = response.json()
-        if "candidates" in res_json:
-            return res_json['candidates'][0]['content']['parts'][0]['text']
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        elif response.status_code == 429:
+            st.error("⏳ Лимит API. Подождите 30 секунд.")
         else:
-            return f"⚠️ Ошибка API: {res_json.get('error', {}).get('message', 'Неизвестная ошибка')}"
+            st.error(f"Ошибка API {response.status_code}: {response.text}")
     except Exception as e:
-        return f"⚠️ Ошибка связи: {str(e)}"
+        st.error(f"Ошибка соединения: {e}")
+    return None
 
-# --- 3. ИЗВЛЕЧЕНИЕ ТЕКСТА ---
-def extract_text(file):
+# --- 3. HELPERS ---
+def extract_text(file_bytes, filename):
     try:
-        if file.name.endswith(".pdf"):
-            return " ".join([p.extract_text() for p in PdfReader(file).pages])
-        elif file.name.endswith(".docx"):
-            return "\n".join([p.text for p in Document(file).paragraphs])
+        if filename.lower().endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(file_bytes))
+            return " ".join([p.extract_text() for p in reader.pages if p.extract_text()])[:40000]
+        elif filename.lower().endswith(".docx"):
+            doc = Document(io.BytesIO(file_bytes))
+            return "\n".join([p.text for p in doc.paragraphs])[:40000]
+        return ""
     except: return "Ошибка чтения файла."
-    return ""
 
-def extract_from_url(url):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        # Убираем лишний мусор со страницы
-        for s in soup(["script", "style", "nav", "header", "footer"]): s.decompose()
-        return soup.get_text(separator=' ')[:30000]
-    except: return "Ошибка загрузки URL."
+def create_docx(text, title):
+    doc = Document()
+    doc.add_heading(title, 0)
+    clean_text = re.sub(r'[*#_`>]', '', text)
+    for line in clean_text.split('\n'):
+        if line.strip(): doc.add_paragraph(line)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
-# --- 4. БОКОВАЯ ПАНЕЛЬ ---
+# --- 4. SIDEBAR (Настройки и Сброс) ---
 with st.sidebar:
-    st.title("⚖️ LegalAI Pro 2.0")
-    audience = st.radio("Роль анализа:", ["Гражданин", "Предприниматель", "Юрист"])
-    jurisdiction = st.selectbox("Юрисдикция:", ["РФ (ГК, КоАП)", "СНГ", "Международное право"])
+    st.header("⚙️ Параметры анализа")
+    jurisdiction = st.selectbox("Юрисдикция:", ["РФ", "Казахстан", "Узбекистан", "ЕС", "Международная"])
+    analysis_depth = st.select_slider("Детальность:", options=["Кратко", "Стандарт", "Максимум"])
     
     st.divider()
-    if st.button("🔄 Сбросить всё", use_container_width=True):
-        reset_app()
-    
-    st.divider()
-    st.success("🤖 Модель: 2.0 Flash (No SDK)")
+    if st.button("🗑️ Сбросить всё", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
-# --- 5. ГЛАВНЫЙ ЭКРАН ---
-tab1, tab2 = st.tabs(["📄 Документ / Фото", "🔗 Ссылка"])
+# --- 5. MAIN UI ---
+st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
+st.caption(f"Интеллектуальный помощник на базе {TARGET_MODEL}")
+
+tab1, tab2, tab3 = st.tabs(["🚀 АУДИТ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТЫ"])
 
 with tab1:
-    up = st.file_uploader("Загрузите договор", type=["pdf", "docx", "jpg", "png"])
+    col_in, col_res = st.columns([1, 1.2])
+    with col_in:
+        input_type = st.radio("Источник:", ["Файл / Скан", "Вставить текст"], horizontal=True)
+        
+        target_content = None
+        is_image = False
+        
+        if input_type == "Файл / Скан":
+            up_file = st.file_uploader("Загрузите договор", type=["pdf", "docx", "png", "jpg", "jpeg"])
+            if up_file:
+                if up_file.type.startswith("image"):
+                    target_content, is_image = up_file.getvalue(), True
+                else:
+                    target_content = extract_text(up_file.getvalue(), up_file.name)
+        else:
+            target_content = st.text_area("Вставьте текст договора из буфера:", height=300)
+
+        if st.button("🚀 ЗАПУСТИТЬ ААНАЛИЗ", type="primary"):
+            if target_content:
+                with col_res:
+                    with st.spinner("Юрист ИИ изучает документ..."):
+                        p = f"Ты эксперт-юрист. Юрисдикция: {jurisdiction}. Глубина анализа: {analysis_depth}. Найди все риски и предложи правки."
+                        if is_image:
+                            res = call_gemini_direct(p, target_content)
+                        else:
+                            res = call_gemini_direct(f"{p}\n\nДОКУМЕНТ:\n{target_content}")
+                        
+                        if res:
+                            st.session_state.audit_res = res
+            else:
+                st.warning("Сначала загрузите файл или вставьте текст.")
+
+    if "audit_res" in st.session_state:
+        with col_res:
+            st.markdown(st.session_state.audit_res)
+            st.download_button("📥 Скачать в Word", create_docx(st.session_state.audit_res, "Аудит Рисков"), "Legal_Audit.docx")
 
 with tab2:
-    url_input = st.text_input("Вставьте ссылку на оферту")
+    st.subheader("Сравнение версий")
+    c1, c2 = st.columns(2)
+    f1 = c1.file_uploader("Версия А (Оригинал)", type=["pdf", "docx"], key="c1")
+    f2 = c2.file_uploader("Версия Б (Правки)", type=["pdf", "docx"], key="c2")
+    if st.button("⚖️ СРАВНИТЬ") and f1 and f2:
+        with st.spinner("Сравниваем..."):
+            t1, t2 = extract_text(f1.getvalue(), f1.name), extract_text(f2.getvalue(), f2.name)
+            res = call_gemini_direct(f"Сравни два текста. Выведи таблицу изменений и риски. Юрисдикция: {jurisdiction}.\n1: {t1}\n2: {t2}")
+            if res: st.markdown(res)
 
-if st.button("🚀 НАЧАТЬ АУДИТ", type="primary", use_container_width=True):
-    txt_to_analyze = ""
-    is_image = False
-    
-    if up:
-        if up.type.startswith("image"):
-            txt_to_analyze, is_image = up.getvalue(), True
-        else:
-            txt_to_analyze = extract_text(up)
-    elif url_input:
-        with st.spinner("Читаю сайт..."):
-            txt_to_analyze = extract_from_url(url_input)
-
-    if txt_to_analyze:
-        with st.spinner(f"Анализирую для: {audience}..."):
-            prompts = {
-                "Гражданин": "Найди скрытые риски и штрафы. Пиши просто.",
-                "Предприниматель": "Фокус на сроки, ответственность и штрафы. Score 0-100.",
-                "Юрист": f"Анализ по праву {jurisdiction}. Поиск коллизий и лазеек."
-            }
-            full_p = f"Role: Senior Lawyer. Audience: {audience}. Jurisdiction: {jurisdiction}. {prompts[audience]} Format: SCORE: X/100, ### 🔴 РИСКИ, ### 🟡 СОВЕТЫ, ### 🟢 ПЛАН ДЕЙСТВИЙ (списком)."
-            
-            st.session_state.res = call_gemini(full_p, txt_to_analyze, is_img=is_image)
-    else:
-        st.error("Нет данных для анализа.")
-
-# --- 6. ВЫВОД ---
-if "res" in st.session_state:
-    res = st.session_state.res
-    left, right = st.columns([2, 1])
-    
-    with left:
-        st.subheader("📊 Анализ")
-        sections = res.split("###")
-        for s in sections:
-            if "🔴" in s: st.error(s)
-            elif "🟡" in s: st.warning(s)
-            elif "🟢" in s: st.success(s)
-            else: st.markdown(s)
-
-    with right:
-        st.subheader("✅ Чек-лист")
-        steps = re.findall(r"-\s*(.*?)(?:\n|$)", res)
-        for i, step in enumerate(steps[:10]):
-            st.checkbox(step.strip(), key=f"ch_{i}")
+with tab3:
+    st.subheader("Генератор ответов")
+    claim = st.text_area("Текст претензии или письма:")
+    user_goal = st.text_input("Ваша позиция (напр. 'Отказ', 'Мирная'):", value="Защита интересов")
+    if st.button("✍️ СФОРМИРОВАТЬ ОТВЕТ") and claim:
+        with st.spinner("Пишем письмо..."):
+            res = call_gemini_direct(f"Напиши официальный ответ на претензию. Юрисдикция: {jurisdiction}. Позиция: {user_goal}.\n\nТЕКСТ:\n{claim}")
+            if res:
+                st.session_state.ans_res = res
+                st.markdown(res)
+                st.download_button("📥 Скачать ответ", create_docx(st.session_state.ans_res, "Официальный Ответ"), "Response.docx")
