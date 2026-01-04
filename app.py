@@ -6,9 +6,6 @@ from docx import Document
 from bs4 import BeautifulSoup
 import io
 import base64
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
 
 # -------------------
 # 1. Настройки страницы
@@ -31,9 +28,9 @@ DISCLAIMER_TEXT = "⚠️ ВНИМАНИЕ: Анализ выполнен ИИ. 
 # 2. Модели и API
 # -------------------
 MODEL_POLICY = [
-    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",   # первичный для теста стабильности
     "gemini-2.0-flash-lite",
-    "gemini-2.5-flash-lite"
+    "gemini-2.5-flash"
 ]
 
 API_KEY = st.secrets.get("GOOGLE_API_KEY")  # один ключ
@@ -41,6 +38,7 @@ API_KEY = st.secrets.get("GOOGLE_API_KEY")  # один ключ
 def call_gemini_safe(prompt, content, is_image=False):
     for model in MODEL_POLICY:
         try:
+            st.session_state.last_model_used = model  # для теста
             url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={API_KEY}"
             if is_image:
                 img_b64 = base64.b64encode(content).decode('utf-8')
@@ -51,13 +49,15 @@ def call_gemini_safe(prompt, content, is_image=False):
             if r.status_code == 200:
                 return r.json()['candidates'][0]['content']['parts'][0]['text']
             elif r.status_code in [429, 503]:
+                st.session_state.last_error = f"{r.status_code} {r.text}"
                 continue
-        except:
+        except Exception as e:
+            st.session_state.last_error = str(e)
             continue
     return "⚠️ Модель временно недоступна. Попробуйте позже."
 
 # -------------------
-# 3. Инструменты для PDF/Word
+# 3. Word генерация и извлечение текста
 # -------------------
 def create_docx(text, title):
     doc = Document()
@@ -67,27 +67,6 @@ def create_docx(text, title):
     for line in text.replace('*','').split('\n'):
         if line.strip(): doc.add_paragraph(line)
     buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-    return buf
-
-def create_pdf(text, title):
-    buf = io.BytesIO()
-    pdfmetrics.registerFont(TTFont('Roboto', 'Roboto-Regular.ttf'))
-    c = canvas.Canvas(buf)
-    c.setFont("Roboto", 12)
-    y = 800
-    c.drawString(50, y, title)
-    y -= 20
-    c.drawString(50, y, DISCLAIMER_TEXT)
-    y -= 40
-    for line in text.split('\n'):
-        if y < 50:
-            c.showPage()
-            c.setFont("Roboto", 12)
-            y = 800
-        c.drawString(50, y, line)
-        y -= 20
-    c.save()
-    buf.seek(0)
     return buf
 
 def extract_text(file_bytes, filename):
@@ -117,7 +96,7 @@ with st.sidebar:
 # 5. Main Interface
 # -------------------
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
-tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "🔍 СРАВНЕНИЕ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
+tab1, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
 
 with tab1:
     c1, c2 = st.columns([1,1.3])
@@ -167,18 +146,12 @@ with tab1:
                 else:
                     st.markdown(part)
             st.download_button("📥 Скачать Word отчет", create_docx(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.docx")
-            st.download_button("📥 Скачать PDF отчет", create_pdf(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.pdf")
 
-with tab2:
-    st.subheader("🔍 Сравнение версий")
-    col_a, col_b = st.columns(2)
-    fa = col_a.file_uploader("Версия А", type=["pdf","docx"], key="fa")
-    fb = col_b.file_uploader("Версия Б", type=["pdf","docx"], key="fb")
-    if st.button("⚖️ НАЙТИ РАЗНИЦУ") and fa and fb:
-        with st.spinner("Сравниваю..."):
-            res = call_gemini_safe("Найди отличия и составь таблицу изменений.",
-                                   f"А: {extract_text(fa.getvalue(),fa.name)}\nБ: {extract_text(fb.getvalue(),fb.name)}")
-            if res: st.markdown(res)
+            # Для теста: показываем модель и ошибки
+            if "last_model_used" in st.session_state:
+                st.info(f"Использованная модель для последнего анализа: {st.session_state.last_model_used}")
+            if "last_error" in st.session_state:
+                st.warning(f"Последняя ошибка модели: {st.session_state.last_error}")
 
 with tab3:
     st.subheader("✍️ Протоколы и письма")
