@@ -6,7 +6,9 @@ from docx import Document
 from bs4 import BeautifulSoup
 import io
 import base64
-from docx.shared import RGBColor
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
 
 # -------------------
 # 1. Настройки страницы
@@ -29,9 +31,9 @@ DISCLAIMER_TEXT = "⚠️ ВНИМАНИЕ: Анализ выполнен ИИ. 
 # 2. Модели и API
 # -------------------
 MODEL_POLICY = [
-    "gemini-2.5-flash-lite",   # первичный для теста стабильности
+    "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-2.5-flash"
+    "gemini-2.5-flash-lite"
 ]
 
 API_KEY = st.secrets.get("GOOGLE_API_KEY")  # один ключ
@@ -39,7 +41,6 @@ API_KEY = st.secrets.get("GOOGLE_API_KEY")  # один ключ
 def call_gemini_safe(prompt, content, is_image=False):
     for model in MODEL_POLICY:
         try:
-            st.session_state.last_model_used = model  # для теста
             url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={API_KEY}"
             if is_image:
                 img_b64 = base64.b64encode(content).decode('utf-8')
@@ -50,80 +51,42 @@ def call_gemini_safe(prompt, content, is_image=False):
             if r.status_code == 200:
                 return r.json()['candidates'][0]['content']['parts'][0]['text']
             elif r.status_code in [429, 503]:
-                st.session_state.last_error = f"{r.status_code} {r.text}"
                 continue
-        except Exception as e:
-            st.session_state.last_error = str(e)
+        except:
             continue
     return "⚠️ Модель временно недоступна. Попробуйте позже."
 
 # -------------------
-# 3. Word генерация и извлечение текста
+# 3. Инструменты для PDF/Word
 # -------------------
-def create_docx_highlight(text, title):
+def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
     doc.add_paragraph(DISCLAIMER_TEXT).italic = True
     doc.add_paragraph("-"*40)
-    
     for line in text.replace('*','').split('\n'):
-        if not line.strip():
-            continue
-        p = doc.add_paragraph()
-        run = p.add_run(line)
-
-        # Подсветка по символам
-        if "🔴" in line:
-            run.font.color.rgb = RGBColor(255,0,0)       # красный
-        elif "💸" in line:
-            run.font.color.rgb = RGBColor(255,165,0)     # оранжевый
-        elif "⚠️" in line:
-            run.font.color.rgb = RGBColor(255,215,0)     # жёлтый
-        else:
-            run.font.color.rgb = RGBColor(0,0,0)         # чёрный
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
+        if line.strip(): doc.add_paragraph(line)
+    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
     return buf
 
-def create_docx_table_highlight(md_table_text, title):
-    doc = Document()
-    doc.add_heading(title, 0)
-    doc.add_paragraph(DISCLAIMER_TEXT).italic = True
-    doc.add_paragraph("-"*40)
-
-    lines = [line.strip() for line in md_table_text.split('\n') if line.strip()]
-    if len(lines) < 2:
-        doc.add_paragraph(md_table_text)
-        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-        return buf
-
-    headers = [h.strip() for h in lines[0].split('|') if h.strip()]
-    n_cols = len(headers)
-    table = doc.add_table(rows=1, cols=n_cols)
-    table.style = 'Table Grid'
-    for i, h in enumerate(headers):
-        table.rows[0].cells[i].text = h
-
-    for line in lines[2:]:
-        cells = [c.strip() for c in line.split('|') if c.strip()]
-        if len(cells) != n_cols:
-            continue
-        row = table.add_row().cells
-        for i, c in enumerate(cells):
-            run = row[i].paragraphs[0].add_run(c)
-            if "🔴" in c:
-                run.font.color.rgb = RGBColor(255,0,0)
-            elif "💸" in c:
-                run.font.color.rgb = RGBColor(255,165,0)
-            elif "⚠️" in c:
-                run.font.color.rgb = RGBColor(255,215,0)
-            else:
-                run.font.color.rgb = RGBColor(0,0,0)
-
+def create_pdf(text, title):
     buf = io.BytesIO()
-    doc.save(buf)
+    pdfmetrics.registerFont(TTFont('Roboto', 'Roboto-Regular.ttf'))
+    c = canvas.Canvas(buf)
+    c.setFont("Roboto", 12)
+    y = 800
+    c.drawString(50, y, title)
+    y -= 20
+    c.drawString(50, y, DISCLAIMER_TEXT)
+    y -= 40
+    for line in text.split('\n'):
+        if y < 50:
+            c.showPage()
+            c.setFont("Roboto", 12)
+            y = 800
+        c.drawString(50, y, line)
+        y -= 20
+    c.save()
     buf.seek(0)
     return buf
 
@@ -154,7 +117,7 @@ with st.sidebar:
 # 5. Main Interface
 # -------------------
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
-tab1, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
+tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "🔍 СРАВНЕНИЕ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
 
 with tab1:
     c1, c2 = st.columns([1,1.3])
@@ -203,17 +166,19 @@ with tab1:
                     st.markdown(f'<div class="risk-card">{part}</div>', unsafe_allow_html=True)
                 else:
                     st.markdown(part)
-            st.download_button(
-                "📥 Скачать Word отчет",
-                create_docx_highlight(st.session_state.audit_max, f"Анализ {dtype}"),
-                "Legal_Report.docx"
-            )
+            st.download_button("📥 Скачать Word отчет", create_docx(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.docx")
+            st.download_button("📥 Скачать PDF отчет", create_pdf(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.pdf")
 
-            # Для теста: показываем модель и ошибки
-            if "last_model_used" in st.session_state:
-                st.info(f"Использованная модель для последнего анализа: {st.session_state.last_model_used}")
-            if "last_error" in st.session_state:
-                st.warning(f"Последняя ошибка модели: {st.session_state.last_error}")
+with tab2:
+    st.subheader("🔍 Сравнение версий")
+    col_a, col_b = st.columns(2)
+    fa = col_a.file_uploader("Версия А", type=["pdf","docx"], key="fa")
+    fb = col_b.file_uploader("Версия Б", type=["pdf","docx"], key="fb")
+    if st.button("⚖️ НАЙТИ РАЗНИЦУ") and fa and fb:
+        with st.spinner("Сравниваю..."):
+            res = call_gemini_safe("Найди отличия и составь таблицу изменений.",
+                                   f"А: {extract_text(fa.getvalue(),fa.name)}\nБ: {extract_text(fb.getvalue(),fb.name)}")
+            if res: st.markdown(res)
 
 with tab3:
     st.subheader("✍️ Протоколы и письма")
@@ -228,11 +193,7 @@ with tab3:
                 if res: 
                     st.session_state.prot_res = res
                     st.markdown(res)
-                    st.download_button(
-                        "📥 Скачать Протокол",
-                        create_docx_table_highlight(res, "Протокол разногласий"),
-                        "Protocol.docx"
-                    )
+                    st.download_button("📥 Скачать Протокол", create_docx(res,"Протокол разногласий"),"Protocol.docx")
     st.divider()
     manual = st.text_area("Или напишите задачу вручную (напр. 'Напиши претензию'):")
     if st.button("✉️ СОЗДАТЬ ДОКУМЕНТ"):
