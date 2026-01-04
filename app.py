@@ -8,7 +8,6 @@ from PIL import Image
 import io
 import re
 import base64
-from fpdf import FPDF # Библиотека fpdf2
 
 # --- 1. CONFIG & STYLES ---
 st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
@@ -40,7 +39,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# ТВОЯ МОДЕЛЬ (НЕ ТРОГАЕМ)
 TARGET_MODEL = "gemini-2.5-flash-lite"
+DISCLAIMER_TEXT = "ВНИМАНИЕ: Данный отчет сформирован искусственным интеллектом. Анализ носит информационный характер и не является официальным юридическим заключением. Рекомендуется проверка профессиональным юристом."
 
 # --- 2. CORE ENGINE ---
 def call_gemini_direct(prompt, image_bytes=None):
@@ -64,24 +65,20 @@ def call_gemini_direct(prompt, image_bytes=None):
         st.error(f"Ошибка соединения: {e}")
     return None
 
-# --- 3. HELPERS (PDF & DOCX) ---
-def create_pdf(text, title):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, title, ln=True, align='C')
-    pdf.ln(10)
-    pdf.set_font("Arial", size=12)
-    # Очистка текста от символов, которые не поддерживает стандартный шрифт PDF
-    clean_text = text.replace('🔴', '[RISK]').replace('*', '').encode('latin-1', 'replace').decode('latin-1')
-    pdf.multi_cell(0, 10, txt=clean_text)
-    return pdf.output()
-
+# --- 3. HELPERS ---
 def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
-    for line in text.replace('*', '').split('\n'):
+    
+    # Добавляем дисклеймер в начало файла Word
+    p = doc.add_paragraph()
+    p.add_run(DISCLAIMER_TEXT).italic = True
+    doc.add_paragraph("-" * 30)
+
+    clean_text = text.replace('*', '').replace('#', '')
+    for line in clean_text.split('\n'):
         if line.strip(): doc.add_paragraph(line)
+    
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
@@ -96,7 +93,7 @@ def extract_text(file_bytes, filename):
             doc = Document(io.BytesIO(file_bytes))
             return "\n".join([p.text for p in doc.paragraphs])[:40000]
         return ""
-    except: return "Ошибка чтения."
+    except: return "Ошибка чтения файла."
 
 def extract_from_url(url):
     try:
@@ -104,7 +101,7 @@ def extract_from_url(url):
         soup = BeautifulSoup(r.text, 'html.parser')
         for s in soup(["script", "style", "nav", "footer"]): s.decompose()
         return soup.get_text(separator=' ')[:30000]
-    except: return "Ошибка загрузки."
+    except: return "Ошибка загрузки ссылки."
 
 # --- 4. SIDEBAR ---
 with st.sidebar:
@@ -117,12 +114,8 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-    st.markdown("""
-    <div class="disclaimer-box">
-    <b>⚠️ ПРЕДУПРЕЖДЕНИЕ:</b><br>
-    Этот сервис использует ИИ. Результаты не являются юридической консультацией.
-    </div>
-    """, unsafe_allow_html=True)
+    # Дисклеймер в интерфейсе
+    st.markdown(f'<div class="disclaimer-box">{DISCLAIMER_TEXT}</div>', unsafe_allow_html=True)
 
 # --- 5. MAIN UI ---
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
@@ -153,37 +146,45 @@ with tab1:
             if target_content:
                 with col_res:
                     with st.spinner("Анализирую..."):
-                        p = f"Ты эксперт-юрист. Роль: {audience}. Юрисдикция: {jurisdiction}. Найди риски и выдели их 🔴."
+                        p = f"Ты эксперт-юрист. Роль: {audience}. Юрисдикция: {jurisdiction}. Выдели критические риски 🔴."
                         res = call_gemini_direct(p, target_content) if is_image else call_gemini_direct(f"{p}\n\nДОК:\n{target_content}")
                         if res: st.session_state.audit_res = res
 
     if "audit_res" in st.session_state:
         with col_res:
             for block in st.session_state.audit_res.split('\n'):
-                if "🔴" in block: st.markdown(f'<div class="critical-risk">{block}</div>', unsafe_allow_html=True)
-                else: st.markdown(block)
+                if "🔴" in block:
+                    st.markdown(f'<div class="critical-risk">{block}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(block)
             
-            # БЛОК СКАЧИВАНИЯ
-            c1, c2 = st.columns(2)
-            c1.download_button("📥 Скачать Word", create_docx(st.session_state.audit_res, "Аудит"), "Audit.docx")
-            
-            # Кнопка PDF
-            try:
-                pdf_data = create_pdf(st.session_state.audit_res, "Юридический Аудит")
-                c2.download_button("📥 Скачать PDF", data=pdf_data, file_name="Legal_Audit.pdf", mime="application/pdf")
-            except:
-                c2.error("Ошибка генерации PDF")
+            st.download_button(
+                label="📥 Скачать Word отчёт",
+                data=create_docx(st.session_state.audit_res, "Юридический аудит"),
+                file_name="Legal_Audit.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
 
-# Остальные вкладки (tab2, tab3) остаются как в прошлом коде
+with tab2:
+    st.subheader("Сравнение версий")
+    c1, c2 = st.columns(2)
+    f1 = c1.file_uploader("Оригинал", type=["pdf", "docx"], key="f1")
+    f2 = c2.file_uploader("Правки", type=["pdf", "docx"], key="f2")
+    if st.button("⚖️ СРАВНИТЬ"):
+        if f1 and f2:
+            t1, t2 = extract_text(f1.getvalue(), f1.name), extract_text(f2.getvalue(), f2.name)
+            res = call_gemini_direct(f"Сравни два документа и выведи таблицу изменений:\n1: {t1}\n2: {t2}")
+            if res: st.markdown(res)
+
 with tab3:
     st.subheader("Генератор документов")
-    doc_type = st.selectbox("Тип документа:", ["Протокол разногласий (Таблица)", "Претензия", "Сопроводительное письмо"])
-    context = st.text_area("Данные для документа:")
-    if st.button("✍️ СГЕНЕРИРОВАТЬ") and context:
-        with st.spinner("Пишем..."):
-            res = call_gemini_direct(f"Напиши {doc_type} на основе этого текста:\n{context}")
-            if res:
-                st.session_state.doc_res = res
-                st.markdown(res)
-                st.download_button("📥 Скачать документ", create_docx(st.session_state.doc_res, doc_type), f"{doc_type}.docx")
-                                 
+    doc_type = st.selectbox("Что создать?", ["Протокол разногласий (Таблица)", "Претензия", "Сопроводительное письмо"])
+    context = st.text_area("Детали ситуации:")
+    if st.button("✍️ СГЕНЕРИРОВАТЬ"):
+        if context:
+            with st.spinner("Пишем..."):
+                prompt = "Создай таблицу: пункт договора, наша версия, обоснование." if "Протокол" in doc_type else f"Напиши {doc_type}."
+                res = call_gemini_direct(f"{prompt}\n\nКОНТЕКСТ:\n{context}")
+                if res:
+                    st.markdown(res)
+                    st.download_button("📥 Скачать документ", create_docx(res, doc_type), f"{doc_type}.docx")
