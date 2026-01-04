@@ -3,6 +3,7 @@ import requests
 import json
 from PyPDF2 import PdfReader
 from docx import Document
+from bs4 import BeautifulSoup # Для работы со ссылками
 from PIL import Image
 import io
 import re
@@ -17,15 +18,19 @@ st.markdown("""
     .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { width: 100%; border-radius: 8px; }
     .main-header { font-size: 2.2rem; color: #FF4B4B; text-align: center; margin-bottom: 1rem; }
+    /* Стили для подсветки */
+    .critical-risk { background-color: #ffe5e5; border-left: 5px solid #ff4b4b; padding: 10px; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
+# Оставляем твою модель, раз она работает
 TARGET_MODEL = "gemini-2.5-flash-lite"
 
 # --- 2. CORE ENGINE ---
 def call_gemini_direct(prompt, image_bytes=None):
     api_key = st.secrets.get("GOOGLE_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1/models/{TARGET_MODEL}:generateContent?key={api_key}"
+    # Используем v1beta для новых функций
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TARGET_MODEL}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
     if image_bytes:
@@ -38,10 +43,8 @@ def call_gemini_direct(prompt, image_bytes=None):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
-        elif response.status_code == 429:
-            st.error("⏳ Лимит API. Подождите 30 секунд.")
         else:
-            st.error(f"Ошибка API {response.status_code}: {response.text}")
+            st.error(f"Ошибка API: {response.text}")
     except Exception as e:
         st.error(f"Ошибка соединения: {e}")
     return None
@@ -58,6 +61,14 @@ def extract_text(file_bytes, filename):
         return ""
     except: return "Ошибка чтения файла."
 
+def extract_from_url(url):
+    try:
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        for s in soup(["script", "style", "nav", "footer"]): s.decompose()
+        return soup.get_text(separator=' ')[:30000]
+    except: return "Не удалось загрузить текст по ссылке."
+
 def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
@@ -69,9 +80,11 @@ def create_docx(text, title):
     buffer.seek(0)
     return buffer
 
-# --- 4. SIDEBAR (Настройки и Сброс) ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Параметры анализа")
+    # Добавили выбор аудитории
+    audience = st.radio("Аудитория:", ["Гражданин", "Предприниматель", "Юрист"])
     jurisdiction = st.selectbox("Юрисдикция:", ["РФ", "Казахстан", "Узбекистан", "ЕС", "Международная"])
     analysis_depth = st.select_slider("Детальность:", options=["Кратко", "Стандарт", "Максимум"])
     
@@ -82,14 +95,14 @@ with st.sidebar:
 
 # --- 5. MAIN UI ---
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
-st.caption(f"Интеллектуальный помощник на базе {TARGET_MODEL}")
 
 tab1, tab2, tab3 = st.tabs(["🚀 АУДИТ РИСКОВ", "🔍 СРАВНЕНИЕ", "✉️ ОТВЕТЫ"])
 
 with tab1:
     col_in, col_res = st.columns([1, 1.2])
     with col_in:
-        input_type = st.radio("Источник:", ["Файл / Скан", "Вставить текст"], horizontal=True)
+        # Добавили "Ссылка" в варианты
+        input_type = st.radio("Источник:", ["Файл / Скан", "Вставить текст", "Ссылка"], horizontal=True)
         
         target_content = None
         is_image = False
@@ -101,14 +114,20 @@ with tab1:
                     target_content, is_image = up_file.getvalue(), True
                 else:
                     target_content = extract_text(up_file.getvalue(), up_file.name)
+        elif input_type == "Ссылка":
+            url_input = st.text_input("Вставьте URL оферты:")
+            if url_input:
+                target_content = extract_from_url(url_input)
         else:
-            target_content = st.text_area("Вставьте текст договора из буфера:", height=300)
+            target_content = st.text_area("Вставьте текст договора:", height=300)
 
-        if st.button("🚀 ЗАПУСТИТЬ ААНАЛИЗ", type="primary"):
+        if st.button("🚀 ЗАПУСТИТЬ АНАЛИЗ", type="primary"):
             if target_content:
                 with col_res:
                     with st.spinner("Юрист ИИ изучает документ..."):
-                        p = f"Ты эксперт-юрист. Юрисдикция: {jurisdiction}. Глубина анализа: {analysis_depth}. Найди все риски и предложи правки."
+                        # Промпт теперь учитывает аудиторию
+                        p = f"Ты эксперт-юрист. Твоя аудитория: {audience}. Юрисдикция: {jurisdiction}. Глубина: {analysis_depth}. Найди риски. Используй 🔴 для критических рисков."
+                        
                         if is_image:
                             res = call_gemini_direct(p, target_content)
                         else:
@@ -117,13 +136,20 @@ with tab1:
                         if res:
                             st.session_state.audit_res = res
             else:
-                st.warning("Сначала загрузите файл или вставьте текст.")
+                st.warning("Предоставьте данные для анализа.")
 
     if "audit_res" in st.session_state:
         with col_res:
-            st.markdown(st.session_state.audit_res)
+            # Подсветка: делим текст на блоки и ищем красный маркер
+            for block in st.session_state.audit_res.split('\n'):
+                if "🔴" in block:
+                    st.markdown(f'<div class="critical-risk">{block}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(block)
+            
             st.download_button("📥 Скачать в Word", create_docx(st.session_state.audit_res, "Аудит Рисков"), "Legal_Audit.docx")
 
+# Вкладки tab2 и tab3 остаются без изменений, чтобы ничего не сломать
 with tab2:
     st.subheader("Сравнение версий")
     c1, c2 = st.columns(2)
@@ -138,7 +164,7 @@ with tab2:
 with tab3:
     st.subheader("Генератор ответов")
     claim = st.text_area("Текст претензии или письма:")
-    user_goal = st.text_input("Ваша позиция (напр. 'Отказ', 'Мирная'):", value="Защита интересов")
+    user_goal = st.text_input("Ваша позиция:", value="Защита интересов")
     if st.button("✍️ СФОРМИРОВАТЬ ОТВЕТ") and claim:
         with st.spinner("Пишем письмо..."):
             res = call_gemini_direct(f"Напиши официальный ответ на претензию. Юрисдикция: {jurisdiction}. Позиция: {user_goal}.\n\nТЕКСТ:\n{claim}")
