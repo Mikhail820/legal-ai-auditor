@@ -38,11 +38,13 @@ st.markdown("""
 
 DISCLAIMER_TEXT = "⚠️ ВНИМАНИЕ: Анализ выполнен ИИ. Не является юридической консультацией. Проконсультируйтесь с юристом."
 
-# --- 2. ДВИЖОК ИИ ---
+# --- 2. TARGET MODEL ---
+TARGET_MODEL = "gemini-2.5-flash-lite"
+
+# --- 3. ФУНКЦИЯ ВЫЗОВА GEMINI 2.5 ---
 def call_gemini(prompt, content, is_image=False):
     api_key = st.secrets.get("GOOGLE_API_KEY")
-    model = st.secrets.get("GEMINI_MODEL", "models/gemini-1.5-flash")
-    url = f"https://generativelanguage.googleapis.com/v1/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/{TARGET_MODEL}:generateContent?key={api_key}"
 
     headers = {"Content-Type": "application/json"}
 
@@ -54,18 +56,13 @@ def call_gemini(prompt, content, is_image=False):
                     {
                         "parts": [
                             {"text": prompt},
-                            {
-                                "inline_data": {
-                                    "mime_type": "image/jpeg",
-                                    "data": img_b64
-                                }
-                            }
+                            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
                         ]
                     }
                 ]
             }
         else:
-            content = content[:25000]  # MVP safeguard
+            content = content[:25000]  # ограничение контента
             payload = {
                 "contents": [
                     {
@@ -89,7 +86,7 @@ def call_gemini(prompt, content, is_image=False):
         st.error(f"Ошибка ИИ: Проверьте интернет или размер документа. ({e})")
         return None
 
-# --- 3. ИНСТРУМЕНТЫ ---
+# --- 4. ФУНКЦИИ ОТЧЁТОВ ---
 def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
@@ -117,12 +114,10 @@ def extract_text(file_bytes, filename):
         return "Ошибка чтения."
     return ""
 
-# --- 4. PDF ТЕСТОВЫЙ С КИРИЛЛИЦЕЙ ---
+# --- 5. PDF С КИРИЛЛИЦЕЙ ---
 def create_pdf_test(text):
     buffer = io.BytesIO()
-
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
-
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -151,7 +146,7 @@ def create_pdf_test(text):
     buffer.seek(0)
     return buffer
 
-# --- 5. БОКОВАЯ ПАНЕЛЬ ---
+# --- 6. БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
     st.header("⚙️ Конфигурация")
     role = st.radio("Кто вы:", ["Предприниматель", "Юрист", "Физическое лицо"])
@@ -163,7 +158,7 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-# --- 6. ОСНОВНОЙ ИНТЕРФЕЙС ---
+# --- 7. ОСНОВНОЙ ИНТЕРФЕЙС ---
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Max</div>', unsafe_allow_html=True)
 tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "🔍 СРАВНЕНИЕ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
 
@@ -236,4 +231,4 @@ with tab1:
                 "test_report.pdf"
             )
 
-# --- tab2 и tab3 оставлены без изменений (см. твой MVP) ---
+# --- tab2 и tab3 оставлены как в твоём MVP ---
