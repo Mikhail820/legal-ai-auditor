@@ -6,13 +6,14 @@ from docx import Document
 from bs4 import BeautifulSoup
 import io
 import base64
+from pathlib import Path
 
 # --- reportlab для PDF ---
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
 
@@ -41,7 +42,7 @@ DISCLAIMER_TEXT = "⚠️ ВНИМАНИЕ: Анализ выполнен ИИ. 
 # --- 2. TARGET MODEL ---
 TARGET_MODEL = "gemini-2.5-flash-lite"
 
-# --- 3. ФУНКЦИЯ ВЫЗОВА GEMINI 2.5 ---
+# --- 3. Вызов Gemini 2.5 ---
 def call_gemini(prompt, content, is_image=False):
     api_key = st.secrets.get("GOOGLE_API_KEY")
     url = f"https://generativelanguage.googleapis.com/v1/models/{TARGET_MODEL}:generateContent?key={api_key}"
@@ -52,47 +53,30 @@ def call_gemini(prompt, content, is_image=False):
         if is_image:
             img_b64 = base64.b64encode(content).decode("utf-8")
             payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": prompt},
-                            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-                        ]
-                    }
-                ]
+                "contents": [{"parts":[{"text": prompt},{"inline_data":{"mime_type":"image/jpeg","data":img_b64}}]}]
             }
         else:
-            content = content[:25000]  # ограничение контента
+            content = content[:25000]
             payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": prompt},
-                            {"text": content}
-                        ]
-                    }
-                ]
+                "contents": [{"parts":[{"text": prompt},{"text": content}]}]
             }
 
         r = requests.post(url, headers=headers, json=payload, timeout=120)
         data = r.json()
-
         if "candidates" not in data:
             raise Exception(data)
-
         return data["candidates"][0]["content"]["parts"][0]["text"]
-
     except Exception as e:
         st.error(f"Ошибка ИИ: Проверьте интернет или размер документа. ({e})")
         return None
 
-# --- 4. ФУНКЦИИ ОТЧЁТОВ ---
+# --- 4. Word отчет ---
 def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
     doc.add_paragraph(DISCLAIMER_TEXT).italic = True
     doc.add_paragraph("-" * 40)
-    for line in text.replace('*', '').split('\n'):
+    for line in text.replace('*','').split('\n'):
         if line.strip():
             doc.add_paragraph(line)
     buf = io.BytesIO()
@@ -100,91 +84,97 @@ def create_docx(text, title):
     buf.seek(0)
     return buf
 
+# --- 5. Текст из файлов ---
 def extract_text(file_bytes, filename):
     try:
         if filename.lower().endswith(".pdf"):
-            return " ".join(
-                [p.extract_text() for p in PdfReader(io.BytesIO(file_bytes)).pages if p.extract_text()]
-            )
+            return " ".join([p.extract_text() for p in PdfReader(io.BytesIO(file_bytes)).pages if p.extract_text()])
         elif filename.lower().endswith(".docx"):
-            return "\n".join(
-                [p.text for p in Document(io.BytesIO(file_bytes)).paragraphs]
-            )
+            return "\n".join([p.text for p in Document(io.BytesIO(file_bytes)).paragraphs])
     except:
         return "Ошибка чтения."
     return ""
 
-# --- 5. PDF С КИРИЛЛИЦЕЙ ---
-def create_pdf_test(text):
+# --- 6. Улучшенный фирменный PDF ---
+def create_pdf_firm_final(text, title="Анализ документа"):
     buffer = io.BytesIO()
-    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiMin-W3"))
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=20 * mm,
-        leftMargin=20 * mm,
-        topMargin=20 * mm,
-        bottomMargin=20 * mm
-    )
+    fonts_path = Path("fonts/PTSans-Regular.ttf")
+    pdfmetrics.registerFont(TTFont("PTSans", str(fonts_path)))
+
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        name="TestStyle",
-        fontName="HeiseiMin-W3",
-        fontSize=11,
-        leading=14
-    ))
+    styles.add(ParagraphStyle("TitleStyle", fontName="PTSans", fontSize=20, leading=24, textColor=HexColor("#FF4B4B"), spaceAfter=15, alignment=1))
+    styles.add(ParagraphStyle("BodyStyle", fontName="PTSans", fontSize=11, leading=14, spaceAfter=6))
+    styles.add(ParagraphStyle("ScoreStyle", fontName="PTSans", fontSize=12, leading=14, textColor=HexColor("white"), backColor=HexColor("#FF4B4B"), spaceAfter=12, leftIndent=6, rightIndent=6))
+    styles.add(ParagraphStyle("RedCard", fontName="PTSans", fontSize=11, leading=14, textColor=HexColor("white"), backColor=HexColor("#c0392b"), spaceAfter=6, leftIndent=6, rightIndent=6))
+    styles.add(ParagraphStyle("OrangeCard", fontName="PTSans", fontSize=11, leading=14, textColor=HexColor("white"), backColor=HexColor("#e67e22"), spaceAfter=6, leftIndent=6, rightIndent=6))
+    styles.add(ParagraphStyle("YellowCard", fontName="PTSans", fontSize=11, leading=14, textColor=HexColor("black"), backColor=HexColor("#f1c40f"), spaceAfter=6, leftIndent=6, rightIndent=6))
+    styles.add(ParagraphStyle("DisclaimerStyle", fontName="PTSans", fontSize=8, textColor=HexColor("#7f8c8d"), spaceAfter=10))
 
     story = []
-    story.append(Paragraph("ТЕСТОВЫЙ PDF ОТЧЁТ", styles["TestStyle"]))
-    story.append(Spacer(1, 12))
-    for line in text.split("\n"):
-        if line.strip():
-            story.append(Paragraph(line, styles["TestStyle"]))
+    story.append(Paragraph(title, styles["TitleStyle"]))
+    story.append(Paragraph(DISCLAIMER_TEXT, styles["DisclaimerStyle"]))
+    story.append(Spacer(1,12))
+
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if "LEGAL SCORE" in line:
+            story.append(Paragraph(line, styles["ScoreStyle"]))
+        elif "🔴" in line:
+            story.append(Paragraph(line, styles["RedCard"]))
+        elif "💸" in line:
+            story.append(Paragraph(line, styles["OrangeCard"]))
+        elif "⚠️" in line:
+            story.append(Paragraph(line, styles["YellowCard"]))
+        else:
+            story.append(Paragraph(line, styles["BodyStyle"]))
 
     doc.build(story)
     buffer.seek(0)
     return buffer
 
-# --- 6. БОКОВАЯ ПАНЕЛЬ ---
+# --- 7. Боковая панель ---
 with st.sidebar:
     st.header("⚙️ Конфигурация")
-    role = st.radio("Кто вы:", ["Предприниматель", "Юрист", "Физическое лицо"])
-    loc = st.selectbox("Страна:", ["РФ", "Казахстан", "Узбекистан", "Международное право"])
-    detail = st.select_slider("Глубина анализа:", options=["Кратко", "Стандарт", "Максимум"])
+    role = st.radio("Кто вы:", ["Предприниматель","Юрист","Физическое лицо"])
+    loc = st.selectbox("Страна:", ["РФ","Казахстан","Узбекистан","Международное право"])
+    detail = st.select_slider("Глубина анализа:", options=["Кратко","Стандарт","Максимум"])
     st.divider()
     st.markdown(f'<div class="disclaimer">{DISCLAIMER_TEXT}</div>', unsafe_allow_html=True)
     if st.button("🗑️ Сбросить всё"):
         st.session_state.clear()
         st.rerun()
 
-# --- 7. ОСНОВНОЙ ИНТЕРФЕЙС ---
+# --- 8. Основной интерфейс ---
 st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Max</div>', unsafe_allow_html=True)
-tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ", "🔍 СРАВНЕНИЕ", "📋 ПРОТОКОЛЫ И ПИСЬМА"])
+tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ","🔍 СРАВНЕНИЕ","📋 ПРОТОКОЛЫ И ПИСЬМА"])
 
 with tab1:
-    c1, c2 = st.columns([1, 1.3])
+    c1,c2 = st.columns([1,1.3])
     with c1:
         dtype = st.selectbox("Тип документа:", [
-            "Договор услуг", "Договор Поставки", "Аренда (Жилая/Коммерц)", 
-            "NDA / Конфиденциальность", "Займ / Инвестиции", "Подряд / Стройка / IT",
-            "Страховой полис", "Купля-продажа (Дом/Авто)", "Кредит / Рассрочка",
-            "Трудовой договор", "Обучение / Онлайн-курсы", "Другое"
+            "Договор услуг","Договор Поставки","Аренда (Жилая/Коммерц)",
+            "NDA / Конфиденциальность","Займ / Инвестиции","Подряд / Стройка / IT",
+            "Страховой полис","Купля-продажа (Дом/Авто)","Кредит / Рассрочка",
+            "Трудовой договор","Обучение / Онлайн-курсы","Другое"
         ])
-        src = st.radio("Загрузка:", ["Файл/Скан", "Текст", "Ссылка"], horizontal=True)
+        src = st.radio("Загрузка:", ["Файл/Скан","Текст","Ссылка"], horizontal=True)
 
-        input_data, is_img = None, False
-        if src == "Файл/Скан":
-            f = st.file_uploader("Загрузите (PDF, DOCX, JPG, PNG)", type=["pdf", "docx", "png", "jpg"])
+        input_data,is_img = None, False
+        if src=="Файл/Скан":
+            f=st.file_uploader("Загрузите (PDF,DOCX,JPG,PNG)", type=["pdf","docx","png","jpg"])
             if f:
                 if f.type.startswith("image"):
-                    input_data, is_img = f.getvalue(), True
+                    input_data,is_img = f.getvalue(),True
                 else:
                     input_data = extract_text(f.getvalue(), f.name)
-        elif src == "Ссылка":
-            url = st.text_input("Вставьте URL:")
+        elif src=="Ссылка":
+            url=st.text_input("Вставьте URL:")
             if url:
-                input_data = BeautifulSoup(requests.get(url).text, 'html.parser').get_text()[:20000]
+                input_data = BeautifulSoup(requests.get(url).text,'html.parser').get_text()[:20000]
         else:
             input_data = st.text_area("Вставьте текст:", height=250)
 
@@ -192,7 +182,7 @@ with tab1:
             if input_data:
                 with c2:
                     with st.spinner("Анализирую риски и потери..."):
-                        p = f"""Отвечай на русском языке.
+                        p=f"""Отвечай на русском языке.
 Ты эксперт по юридическим рискам.
 Роль: {role}. Страна: {loc}. Тип: {dtype}. Детальность: {detail}.
 
@@ -204,31 +194,23 @@ with tab1:
 5. ⚖️ ЗАКОН
 6. 🎯 ВОПРОСЫ
 7. ✅ ИТОГ"""
-                        res = call_gemini(p, input_data, is_img)
-                        if res:
-                            st.session_state.audit_max = res
+                        res = call_gemini(p,input_data,is_img)
+                        if res: st.session_state.audit_max=res
 
     if "audit_max" in st.session_state:
         with c2:
             st.markdown('<div class="score-container"><h3>📊 Результаты анализа</h3></div>', unsafe_allow_html=True)
             for part in st.session_state.audit_max.split('\n'):
-                if any(x in part for x in ["🔴", "💸", "⚠️"]):
+                if any(x in part for x in ["🔴","💸","⚠️"]):
                     st.markdown(f'<div class="risk-card">{part}</div>', unsafe_allow_html=True)
                 else:
                     st.markdown(part)
 
             # Word отчет
-            st.download_button(
-                "📝 Скачать Word отчет",
-                create_docx(st.session_state.audit_max, f"Анализ {dtype}"),
-                "Legal_Report.docx"
-            )
-
-            # PDF тест
-            st.download_button(
-                "🧪 Скачать тестовый PDF",
-                create_pdf_test(st.session_state.audit_max),
-                "test_report.pdf"
-            )
-
-# --- tab2 и tab3 оставлены как в твоём MVP ---
+            st.download_button("📝 Скачать Word отчет",
+                               create_docx(st.session_state.audit_max,f"Анализ {dtype}"),
+                               "Legal_Report.docx")
+            # PDF финальный
+            st.download_button("📄 Скачать фирменный PDF",
+                               create_pdf_firm_final(st.session_state.audit_max,f"Анализ {dtype}"),
+                               "Legal_Report.pdf")
