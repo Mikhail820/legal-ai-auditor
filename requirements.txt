@@ -1,5 +1,6 @@
 streamlit==1.27.0
 requests
 python-docx
+PyPDF2
 beautifulsoup4
 lxml
