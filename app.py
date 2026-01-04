@@ -6,6 +6,7 @@ from docx import Document
 from bs4 import BeautifulSoup
 import io
 import base64
+from docx.shared import RGBColor
 
 # -------------------
 # 1. Настройки страницы
@@ -59,14 +60,71 @@ def call_gemini_safe(prompt, content, is_image=False):
 # -------------------
 # 3. Word генерация и извлечение текста
 # -------------------
-def create_docx(text, title):
+def create_docx_highlight(text, title):
     doc = Document()
     doc.add_heading(title, 0)
     doc.add_paragraph(DISCLAIMER_TEXT).italic = True
     doc.add_paragraph("-"*40)
+    
     for line in text.replace('*','').split('\n'):
-        if line.strip(): doc.add_paragraph(line)
-    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        if not line.strip():
+            continue
+        p = doc.add_paragraph()
+        run = p.add_run(line)
+
+        # Подсветка по символам
+        if "🔴" in line:
+            run.font.color.rgb = RGBColor(255,0,0)       # красный
+        elif "💸" in line:
+            run.font.color.rgb = RGBColor(255,165,0)     # оранжевый
+        elif "⚠️" in line:
+            run.font.color.rgb = RGBColor(255,215,0)     # жёлтый
+        else:
+            run.font.color.rgb = RGBColor(0,0,0)         # чёрный
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+def create_docx_table_highlight(md_table_text, title):
+    doc = Document()
+    doc.add_heading(title, 0)
+    doc.add_paragraph(DISCLAIMER_TEXT).italic = True
+    doc.add_paragraph("-"*40)
+
+    lines = [line.strip() for line in md_table_text.split('\n') if line.strip()]
+    if len(lines) < 2:
+        doc.add_paragraph(md_table_text)
+        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        return buf
+
+    headers = [h.strip() for h in lines[0].split('|') if h.strip()]
+    n_cols = len(headers)
+    table = doc.add_table(rows=1, cols=n_cols)
+    table.style = 'Table Grid'
+    for i, h in enumerate(headers):
+        table.rows[0].cells[i].text = h
+
+    for line in lines[2:]:
+        cells = [c.strip() for c in line.split('|') if c.strip()]
+        if len(cells) != n_cols:
+            continue
+        row = table.add_row().cells
+        for i, c in enumerate(cells):
+            run = row[i].paragraphs[0].add_run(c)
+            if "🔴" in c:
+                run.font.color.rgb = RGBColor(255,0,0)
+            elif "💸" in c:
+                run.font.color.rgb = RGBColor(255,165,0)
+            elif "⚠️" in c:
+                run.font.color.rgb = RGBColor(255,215,0)
+            else:
+                run.font.color.rgb = RGBColor(0,0,0)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
     return buf
 
 def extract_text(file_bytes, filename):
@@ -145,7 +203,11 @@ with tab1:
                     st.markdown(f'<div class="risk-card">{part}</div>', unsafe_allow_html=True)
                 else:
                     st.markdown(part)
-            st.download_button("📥 Скачать Word отчет", create_docx(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.docx")
+            st.download_button(
+                "📥 Скачать Word отчет",
+                create_docx_highlight(st.session_state.audit_max, f"Анализ {dtype}"),
+                "Legal_Report.docx"
+            )
 
             # Для теста: показываем модель и ошибки
             if "last_model_used" in st.session_state:
@@ -166,7 +228,11 @@ with tab3:
                 if res: 
                     st.session_state.prot_res = res
                     st.markdown(res)
-                    st.download_button("📥 Скачать Протокол", create_docx(res,"Протокол разногласий"),"Protocol.docx")
+                    st.download_button(
+                        "📥 Скачать Протокол",
+                        create_docx_table_highlight(res, "Протокол разногласий"),
+                        "Protocol.docx"
+                    )
     st.divider()
     manual = st.text_area("Или напишите задачу вручную (напр. 'Напиши претензию'):")
     if st.button("✉️ СОЗДАТЬ ДОКУМЕНТ"):
