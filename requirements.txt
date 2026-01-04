@@ -1,7 +1,7 @@
 streamlit
 requests
-PyPDF2
 python-docx
+PyPDF2
 beautifulsoup4
+lxml
 reportlab
-
