@@ -3,17 +3,17 @@ import requests
 import json
 from PyPDF2 import PdfReader
 from docx import Document
+from docx.shared import Pt
 from bs4 import BeautifulSoup
 import io
 import base64
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
+import re
 
 # -------------------
 # 1. Настройки страницы
 # -------------------
 st.set_page_config(page_title="LegalAI Enterprise Pro", page_icon="⚖️", layout="wide")
+
 st.markdown("""
 <style>
 .stButton>button { width: 100%; border-radius: 10px; font-weight: bold; height: 3.5em; background-color: #FF4B4B; color: white; border: none; }
@@ -32,61 +32,84 @@ DISCLAIMER_TEXT = "⚠️ ВНИМАНИЕ: Анализ выполнен ИИ. 
 # -------------------
 MODEL_POLICY = [
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash-lite"
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
 ]
 
-API_KEY = st.secrets.get("GOOGLE_API_KEY")  # один ключ
+API_KEY = st.secrets.get("GOOGLE_API_KEY")
 
 def call_gemini_safe(prompt, content, is_image=False):
+    if not API_KEY:
+        return "⚠️ Ошибка: Добавьте GOOGLE_API_KEY в Secrets."
+        
     for model in MODEL_POLICY:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
             if is_image:
                 img_b64 = base64.b64encode(content).decode('utf-8')
                 payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"image/jpeg","data":img_b64}}]}]}
             else:
                 payload = {"contents":[{"parts":[{"text":f"{prompt}\n\nДОКУМЕНТ:\n{content}"}]}]}
+            
             r = requests.post(url, json=payload, timeout=120)
             if r.status_code == 200:
                 return r.json()['candidates'][0]['content']['parts'][0]['text']
-            elif r.status_code in [429, 503]:
+            elif r.status_code in [404, 429, 503]:
                 continue
         except:
             continue
     return "⚠️ Модель временно недоступна. Попробуйте позже."
 
 # -------------------
-# 3. Инструменты для PDF/Word
+# 3. Инструменты (Word с поддержкой таблиц)
 # -------------------
 def create_docx(text, title):
     doc = Document()
     doc.add_heading(title, 0)
     doc.add_paragraph(DISCLAIMER_TEXT).italic = True
-    doc.add_paragraph("-"*40)
-    for line in text.replace('*','').split('\n'):
-        if line.strip(): doc.add_paragraph(line)
-    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-    return buf
+    doc.add_paragraph("-" * 40)
 
-def create_pdf(text, title):
+    # Логика обработки текста и таблиц
+    lines = text.split('\n')
+    table_data = []
+    in_table = False
+
+    for line in lines:
+        # Проверяем, является ли строка частью таблицы Markdown
+        if '|' in line:
+            # Пропускаем разделители типа |---|---|
+            if re.match(r'^[|\s\-:]+$', line):
+                continue
+            cells = [c.strip() for c in line.split('|') if c.strip()]
+            if cells:
+                table_data.append(cells)
+                in_table = True
+        else:
+            if in_table and table_data:
+                # Рисуем таблицу в Word
+                table = doc.add_table(rows=len(table_data), cols=max(len(row) for row in table_data))
+                table.style = 'Table Grid'
+                for i, row in enumerate(table_data):
+                    for j, cell_text in enumerate(row):
+                        table.cell(i, j).text = cell_text
+                table_data = []
+                in_table = False
+            
+            if line.strip():
+                clean_line = line.replace('*', '').replace('#', '')
+                p = doc.add_paragraph(clean_line)
+                if line.startswith('#'): p.style = 'Heading 2'
+
+    # Если текст закончился на таблице
+    if in_table and table_data:
+        table = doc.add_table(rows=len(table_data), cols=max(len(row) for row in table_data))
+        table.style = 'Table Grid'
+        for i, row in enumerate(table_data):
+            for j, cell_text in enumerate(row):
+                table.cell(i, j).text = cell_text
+
     buf = io.BytesIO()
-    pdfmetrics.registerFont(TTFont('Roboto', 'Roboto-Regular.ttf'))
-    c = canvas.Canvas(buf)
-    c.setFont("Roboto", 12)
-    y = 800
-    c.drawString(50, y, title)
-    y -= 20
-    c.drawString(50, y, DISCLAIMER_TEXT)
-    y -= 40
-    for line in text.split('\n'):
-        if y < 50:
-            c.showPage()
-            c.setFont("Roboto", 12)
-            y = 800
-        c.drawString(50, y, line)
-        y -= 20
-    c.save()
+    doc.save(buf)
     buf.seek(0)
     return buf
 
@@ -138,7 +161,9 @@ with tab1:
                 else: input_data = extract_text(f.getvalue(), f.name)
         elif src=="Ссылка":
             url = st.text_input("Вставьте URL:")
-            if url: input_data = BeautifulSoup(requests.get(url).text,'html.parser').get_text()[:30000]
+            if url: 
+                try: input_data = BeautifulSoup(requests.get(url).text,'html.parser').get_text()[:30000]
+                except: st.error("Не удалось открыть ссылку.")
         else:
             input_data = st.text_area("Вставьте текст:", height=250)
 
@@ -166,8 +191,7 @@ with tab1:
                     st.markdown(f'<div class="risk-card">{part}</div>', unsafe_allow_html=True)
                 else:
                     st.markdown(part)
-            st.download_button("📥 Скачать Word отчет", create_docx(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.docx")
-            st.download_button("📥 Скачать PDF отчет", create_pdf(st.session_state.audit_max,f"Анализ {dtype}"), "Legal_Report.pdf")
+            st.download_button("📥 Скачать Word отчет", create_docx(st.session_state.audit_max, f"Анализ {dtype}"), "Legal_Report.docx")
 
 with tab2:
     st.subheader("🔍 Сравнение версий")
@@ -175,10 +199,12 @@ with tab2:
     fa = col_a.file_uploader("Версия А", type=["pdf","docx"], key="fa")
     fb = col_b.file_uploader("Версия Б", type=["pdf","docx"], key="fb")
     if st.button("⚖️ НАЙТИ РАЗНИЦУ") and fa and fb:
-        with st.spinner("Сравниваю..."):
-            res = call_gemini_safe("Найди отличия и составь таблицу изменений.",
-                                   f"А: {extract_text(fa.getvalue(),fa.name)}\nБ: {extract_text(fb.getvalue(),fb.name)}")
-            if res: st.markdown(res)
+        with st.spinner("Сравниваю версии..."):
+            res = call_gemini_safe("Сравни эти две версии документа. Составь таблицу: что изменилось и какой риск это несет.",
+                                   f"Версия А: {extract_text(fa.getvalue(),fa.name)}\n\nВерсия Б: {extract_text(fb.getvalue(),fb.name)}")
+            if res: 
+                st.markdown(res)
+                st.download_button("📥 Скачать Сравнение (Word)", create_docx(res, "Сравнение документов"), "Comparison.docx")
 
 with tab3:
     st.subheader("✍️ Протоколы и письма")
@@ -187,16 +213,20 @@ with tab3:
         if st.button("📋 СГЕНЕРИРОВАТЬ ПРОТОКОЛ РАЗНОГЛАСИЙ"):
             with st.spinner("Создаю таблицу правок..."):
                 res = call_gemini_safe(
-                    "На основе аудита сделай таблицу Протокола: Пункт контрагента - Наша редакция - Почему это важно (потери).",
+                    "На основе аудита сделай таблицу Протокола: Пункт контрагента - Наша редакция - Почему это важно (риск потерь).",
                     st.session_state.audit_max
                 )
                 if res: 
                     st.session_state.prot_res = res
                     st.markdown(res)
-                    st.download_button("📥 Скачать Протокол", create_docx(res,"Протокол разногласий"),"Protocol.docx")
+                    st.download_button("📥 Скачать Протокол (Word)", create_docx(res,"Протокол разногласий"),"Protocol.docx")
     st.divider()
-    manual = st.text_area("Или напишите задачу вручную (напр. 'Напиши претензию'):")
+    manual = st.text_area("Или напишите задачу вручную (напр. 'Напиши досудебную претензию по этому договору'):")
     if st.button("✉️ СОЗДАТЬ ДОКУМЕНТ"):
         if manual:
-            res = call_gemini_safe("Напиши официальный документ.", manual)
-            st.markdown(res)
+            with st.spinner("Формирую текст..."):
+                context = st.session_state.get("audit_max", "")
+                res = call_gemini_safe(f"Напиши официальный документ на основе задачи: {manual}", context)
+                st.markdown(res)
+                st.download_button("📥 Скачать Документ (Word)", create_docx(res, "Юридический документ"), "Legal_Doc.docx")
+        
