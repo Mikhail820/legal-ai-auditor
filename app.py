@@ -3,7 +3,6 @@ import requests
 import json
 from PyPDF2 import PdfReader
 from docx import Document
-from docx.shared import Pt
 from bs4 import BeautifulSoup
 import io
 import base64
@@ -11,14 +10,95 @@ import re
 import time
 from urllib.parse import urlparse
 import logging
+from datetime import datetime, timedelta
+import hashlib
+import threading
+from queue import Queue
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -------------------
-# 1. Настройки интерфейса
-# -------------------
+# ==================== КОНФИГУРАЦИЯ ЛИМИТОВ GOOGLE AI STUDIO FREE TIER ====================
+FREE_TIER_CONFIG = {
+    "models": {
+        # Приоритет: сначала самые "дешевые" по токенам с высокими лимитами
+        "gemini-2.5-flash-lite": {
+            "priority": 1,  # Самый высокий приоритет (максимальный RPD ~1000)
+            "rpm": 15,  # Запросов в минуту
+            "tpm": 250000,  # Токенов в минуту
+            "price_input": 0.0,
+            "price_output": 0.0
+        },
+        "gemini-2.5-flash": {
+            "priority": 2,  # Средний приоритет (RPD ~20-50)
+            "rpm": 10,
+            "tpm": 250000,
+            "price_input": 0.0,
+            "price_output": 0.0
+        },
+        "gemini-2.0-flash-lite": {
+            "priority": 3,  # Низкий приоритет (резерв)
+            "rpm": 15,
+            "tpm": 250000,
+            "price_input": 0.0,
+            "price_output": 0.0
+        }
+    },
+    "global_limits": {
+        "daily_request_limit": 1000,  # Примерный общий лимит на день
+        "reset_time_hours": 0  # Полночь по PT (0 часов)
+    }
+}
+
+# Менеджер лимитов
+class RateLimitManager:
+    def __init__(self):
+        self.requests_log = []
+        self.lock = threading.Lock()
+        self.daily_requests = 0
+        self.last_reset = datetime.utcnow()
+        
+    def check_daily_limit(self):
+        """Проверка дневного лимита запросов"""
+        with self.lock:
+            # Сброс счетчика в 00:00 PT (8:00 UTC)
+            now_utc = datetime.utcnow()
+            if now_utc.hour == 8 and now_utc.minute < 5:
+                if (now_utc - self.last_reset).days >= 1:
+                    self.daily_requests = 0
+                    self.last_reset = now_utc
+                    logger.info("Счетчик дневных запросов сброшен")
+            
+            if self.daily_requests >= FREE_TIER_CONFIG["global_limits"]["daily_request_limit"]:
+                return False
+            self.daily_requests += 1
+            return True
+    
+    def record_request(self, model):
+        """Запись запроса для расчета RPM"""
+        with self.lock:
+            now = time.time()
+            self.requests_log.append((now, model))
+            # Очистка старых записей (старше 1 минуты)
+            self.requests_log = [(t, m) for t, m in self.requests_log if now - t < 60]
+            
+            # Подсчет RPM для конкретной модели
+            model_count = len([(t, m) for t, m in self.requests_log if m == model])
+            return model_count < FREE_TIER_CONFIG["models"][model]["rpm"]
+    
+    def get_wait_time(self, model):
+        """Время ожидания при превышении RPM"""
+        with self.lock:
+            if not self.requests_log:
+                return 0
+            oldest = min(t for t, m in self.requests_log if m == model)
+            return max(0, 60 - (time.time() - oldest))
+
+# Инициализация менеджера лимитов
+limit_manager = RateLimitManager()
+
+# ==================== НАСТРОЙКА ИНТЕРФЕЙСА ====================
 st.set_page_config(
     page_title="LegalAI Enterprise Pro", 
     page_icon="⚖️", 
@@ -26,1150 +106,398 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Кастомные стили
 st.markdown("""
 <style>
-    /* Основные стили */
     .main-header { 
         font-size: 2.5rem; 
         color: #FF4B4B; 
         text-align: center; 
         margin-bottom: 1.5rem; 
         font-weight: 800;
-        padding: 20px 0;
-        background: linear-gradient(90deg, #FF4B4B 0%, #FF6B6B 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
     }
-    
-    .stButton>button { 
-        width: 100%; 
-        border-radius: 10px; 
-        font-weight: bold; 
-        height: 3.5em; 
-        background: linear-gradient(135deg, #FF4B4B 0%, #FF6B6B 100%); 
-        color: white; 
-        border: none;
-        transition: all 0.3s ease;
-        margin-top: 10px;
-    }
-    
-    .stButton>button:hover { 
-        transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(255, 75, 75, 0.4);
-    }
-    
-    .stDownloadButton>button { 
-        width: 100%; 
-        border-radius: 10px; 
-        background: linear-gradient(135deg, #28a745 0%, #20c997 100%); 
-        color: white; 
-        border: none;
-    }
-    
-    /* Карточки рисков */
-    .risk-card { 
-        background-color: #ffffff; 
-        border-left: 6px solid #ff4b4b; 
-        padding: 20px; 
-        border-radius: 8px; 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
-        margin-bottom: 20px; 
-        color: #000;
-        transition: transform 0.3s ease;
-    }
-    
-    .risk-card:hover {
-        transform: translateX(5px);
-    }
-    
-    .score-container { 
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 25px; 
-        border-radius: 15px; 
-        text-align: center; 
-        border: none;
-        margin-bottom: 25px;
-        color: white;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-    }
-    
-    .disclaimer { 
-        font-size: 0.8rem; 
-        color: #7f8c8d; 
-        padding: 15px; 
-        background: #fff3f3; 
-        border-radius: 10px; 
-        border: 1px solid #fab1a0;
+    .limit-warning {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        color: #856404;
+        padding: 12px;
+        border-radius: 8px;
         margin: 10px 0;
+        font-size: 0.9em;
     }
-    
-    /* Вкладки */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+    .limit-critical {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        color: #721c24;
+        padding: 12px;
+        border-radius: 8px;
+        margin: 10px 0;
+        font-size: 0.9em;
     }
-    
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
-        font-weight: 600;
+    .cache-badge {
+        background-color: #d1ecf1;
+        color: #0c5460;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.8em;
+        margin-left: 10px;
     }
-    
-    /* Прогресс бар */
-    .stProgress > div > div > div {
-        background: linear-gradient(90deg, #FF4B4B 0%, #FF6B6B 100%);
-    }
-    
-    /* Боковая панель */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #2d3436 0%, #1a1e1f 100%);
-    }
-    
-    section[data-testid="stSidebar"] h1, 
-    section[data-testid="stSidebar"] h2, 
-    section[data-testid="stSidebar"] h3,
-    section[data-testid="stSidebar"] label {
+    .stButton>button:disabled {
+        background-color: #6c757d !important;
         color: white !important;
-    }
-    
-    /* Улучшенные текстовые области */
-    .stTextArea textarea {
-        border-radius: 10px;
-        border: 2px solid #e0e0e0;
-    }
-    
-    /* Карточки загрузки файлов */
-    .upload-card {
-        border: 2px dashed #667eea;
-        border-radius: 10px;
-        padding: 20px;
-        text-align: center;
-        background: #f8f9fa;
-        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Текст дисклеймера
-DISCLAIMER_TEXT = """
-⚠️ **ВНИМАНИЕ:** 
-Анализ выполнен искусственным интеллектом. Не является юридической консультацией. 
-Все выводы требуют обязательной проверки у квалифицированного юриста. 
-Используйте на свой страх и риск.
-"""
-
-# -------------------
-# 2. Конфигурация моделей и API
-# -------------------
-MODEL_POLICY = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
-]
-
-# Получение API ключа
-try:
-    API_KEY = st.secrets.get("GOOGLE_API_KEY")
-    if not API_KEY:
-        st.error("❌ API ключ не найден в Secrets. Добавьте GOOGLE_API_KEY.")
-except:
-    API_KEY = None
-    st.warning("⚠️ Secrets не настроены. Укажите API ключ вручную.")
-
-# Резервный ввод API ключа
-if not API_KEY:
-    with st.sidebar:
-        API_KEY = st.text_input("🔑 Введите Google API Key:", type="password")
-        if API_KEY:
-            st.success("✅ Ключ принят")
-        else:
-            st.warning("Введите API ключ для работы приложения")
-
-# -------------------
-# 3. Улучшенная функция вызова Gemini
-# -------------------
-@st.cache_data(show_spinner=False, max_entries=10)
-def call_gemini_safe(prompt: str, content: str, is_image: bool = False, model_override: str = None):
+# ==================== УЛУЧШЕННАЯ ФУНКЦИЯ ВЫЗОВА GEMINI ====================
+@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)  # Кэш на 1 час
+def call_gemini_with_limits(_prompt_hash, prompt, content, is_image=False, max_retries=3):
     """
-    Безопасный вызов Gemini API с обработкой ошибок и ретраями
+    Улучшенная функция вызова с учетом всех лимитов Free Tier
     """
-    if not API_KEY:
-        return "❌ Ошибка: Отсутствует API ключ. Добавьте GOOGLE_API_KEY в Secrets или введите вручную."
+    if not st.secrets.get("GOOGLE_API_KEY"):
+        return None, "❌ API ключ не настроен"
     
-    if not content or (isinstance(content, str) and not content.strip()):
-        return "⚠️ Предупреждение: Пустой документ или текст для анализа."
+    # Проверка дневного лимита
+    if not limit_manager.check_daily_limit():
+        return None, "⚠️ Достигнут дневной лимит запросов. Попробуйте завтра."
     
-    # Ограничение длины текста для предотвращения перегрузки
-    if isinstance(content, str) and len(content) > 100000:
-        content = content[:100000] + "\n\n... [текст обрезан из-за большого объема]"
+    # Подготовка моделей в порядке приоритета
+    models_priority = sorted(
+        FREE_TIER_CONFIG["models"].keys(),
+        key=lambda x: FREE_TIER_CONFIG["models"][x]["priority"]
+    )
     
-    models_to_try = [model_override] if model_override else MODEL_POLICY
-    
-    for model_idx, model in enumerate(models_to_try):
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
-            
-            # Формирование payload в зависимости от типа контента
-            if is_image:
-                # Определяем MIME тип по первым байтам
-                if content[:3] == b'\xff\xd8\xff':
-                    mime_type = "image/jpeg"
-                elif content[:8] == b'\x89PNG\r\n\x1a\n':
-                    mime_type = "image/png"
-                else:
-                    mime_type = "image/jpeg"  # fallback
+    for model in models_priority:
+        for retry in range(max_retries):
+            try:
+                # Проверка RPM для модели
+                if not limit_manager.record_request(model):
+                    wait_time = limit_manager.get_wait_time(model)
+                    if wait_time > 0:
+                        logger.warning(f"RPM лимит для {model}. Ждем {wait_time:.1f} сек")
+                        time.sleep(wait_time)
                 
-                img_b64 = base64.b64encode(content).decode('utf-8')
-                payload = {
-                    "contents": [{
-                        "parts": [
-                            {"text": prompt},
-                            {"inline_data": {"mime_type": mime_type, "data": img_b64}}
-                        ]
-                    }],
-                    "generationConfig": {
-                        "temperature": 0.1,
-                        "topP": 0.8,
-                        "topK": 40
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={st.secrets['GOOGLE_API_KEY']}"
+                
+                # Формирование запроса с оптимизацией
+                if is_image:
+                    mime_type = "image/jpeg" if content[:3] == b'\xff\xd8\xff' else "image/png"
+                    img_b64 = base64.b64encode(content).decode('utf-8')
+                    payload = {
+                        "contents": [{
+                            "parts": [
+                                {"text": prompt[:1000]},  # Ограничиваем промпт
+                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}
+                            ]
+                        }],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": 1024,  # Ограничиваем вывод
+                            "topP": 0.8
+                        }
                     }
-                }
-            else:
-                payload = {
-                    "contents": [{
-                        "parts": [{"text": f"{prompt}\n\n=== ДОКУМЕНТ ДЛЯ АНАЛИЗА ===\n{content}\n=== КОНЕЦ ДОКУМЕНТА ==="}]
-                    }],
-                    "generationConfig": {
-                        "temperature": 0.2,
-                        "topP": 0.9,
-                        "topK": 50,
-                        "maxOutputTokens": 4000
-                    }
-                }
-            
-            # Логирование (безопасное)
-            logger.info(f"Вызов модели: {model}, длина контента: {len(content) if isinstance(content, str) else 'image'}")
-            
-            # Вызов API с таймаутом
-            headers = {"Content-Type": "application/json"}
-            response = requests.post(url, json=payload, headers=headers, timeout=120)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if 'candidates' in result and result['candidates']:
-                    text = result['candidates'][0]['content']['parts'][0]['text']
-                    logger.info(f"Успешный ответ от модели {model}")
-                    return text
                 else:
-                    logger.warning(f"Пустой ответ от модели {model}: {result}")
+                    # Оптимизация текста для экономии токенов
+                    if len(content) > 30000:
+                        content = content[:15000] + "\n\n... [текст сокращен для Free Tier] ...\n\n" + content[-15000:]
+                    
+                    payload = {
+                        "contents": [{
+                            "parts": [{"text": f"{prompt[:500]}\n\nТЕКСТ:\n{content}"}]
+                        }],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "maxOutputTokens": 2048,  # Лимит вывода
+                            "topP": 0.9
+                        }
+                    }
+                
+                # Вызов API
+                response = requests.post(url, json=payload, timeout=30)
+                
+                if response.status_code == 429:
+                    # Обработка Rate Limit
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limit для {model}. Retry после {retry_after} сек")
+                    time.sleep(retry_after)
                     continue
-            
-            elif response.status_code == 429:
-                logger.warning(f"Rate limit для модели {model}. Пробуем следующую...")
-                time.sleep(1)  # Небольшая задержка перед ретраем
-                continue
-                
-            else:
-                error_msg = response.json().get('error', {}).get('message', 'Неизвестная ошибка')
-                logger.error(f"Ошибка API ({model}): {response.status_code} - {error_msg}")
-                continue
-                
-        except requests.exceptions.Timeout:
-            logger.warning(f"Таймаут для модели {model}")
-            continue
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Сетевая ошибка для модели {model}: {str(e)}")
-            continue
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка для модели {model}: {str(e)}")
-            continue
-    
-    return "⚠️ Все модели временно недоступны. Пожалуйста, попробуйте позже или проверьте:\n1. Доступность API ключа\n2. Интернет-соединение\n3. Лимиты API"
-
-# -------------------
-# 4. Инструменты для работы с документами
-# -------------------
-def extract_text(file_bytes: bytes, filename: str) -> str:
-    """
-    Извлечение текста из различных форматов файлов
-    """
-    try:
-        filename_lower = filename.lower()
-        
-        if filename_lower.endswith(".pdf"):
-            text_parts = []
-            try:
-                pdf_reader = PdfReader(io.BytesIO(file_bytes))
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        text = page.extract_text()
-                        if text and text.strip():
-                            text_parts.append(f"[Страница {page_num + 1}]\n{text}\n")
-                    except Exception as e:
-                        logger.warning(f"Ошибка чтения страницы {page_num}: {str(e)}")
-                        continue
-                
-                if not text_parts:
-                    return "⚠️ Не удалось извлечь текст из PDF. Возможно, документ состоит из сканированных изображений."
                     
-                return "\n".join(text_parts)
+                elif response.status_code == 200:
+                    result = response.json()
+                    if 'candidates' in result and result['candidates']:
+                        text = result['candidates'][0]['content']['parts'][0]['text']
+                        logger.info(f"Успешно: {model}, токены: ~{len(text)//4}")
+                        return text, None
                 
-            except Exception as e:
-                return f"❌ Ошибка чтения PDF: {str(e)}"
-        
-        elif filename_lower.endswith(".docx"):
-            try:
-                doc = Document(io.BytesIO(file_bytes))
-                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                return "\n".join(paragraphs)
-            except Exception as e:
-                return f"❌ Ошибка чтения DOCX: {str(e)}"
-        
-        elif filename_lower.endswith(".txt"):
-            try:
-                return file_bytes.decode('utf-8', errors='ignore')
-            except:
-                return file_bytes.decode('cp1251', errors='ignore')
-        
-        else:
-            return "❌ Неподдерживаемый формат файла. Используйте PDF, DOCX или TXT."
-            
-    except Exception as e:
-        logger.error(f"Критическая ошибка при извлечении текста: {str(e)}")
-        return f"❌ Не удалось прочитать файл: {str(e)}"
-
-def validate_url(url: str) -> bool:
-    """Проверка валидности URL"""
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ['http', 'https'], result.netloc])
-    except:
-        return False
-
-def fetch_url_content(url: str) -> str:
-    """Безопасное получение контента с веб-страницы"""
-    try:
-        if not validate_url(url):
-            return "❌ Неверный URL. Используйте формат http:// или https://"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(
-            url, 
-            headers=headers, 
-            timeout=15,
-            verify=True,
-            allow_redirects=True
-        )
-        
-        response.raise_for_status()
-        
-        # Проверка типа контента
-        content_type = response.headers.get('content-type', '').lower()
-        if 'text/html' not in content_type:
-            return f"⚠️ URL не содержит HTML. Content-Type: {content_type}"
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Удаляем скрипты и стили
-        for script in soup(["script", "style", "nav", "footer", "header"]):
-            script.decompose()
-        
-        # Извлекаем основной текст
-        text = soup.get_text(separator='\n', strip=True)
-        
-        # Очистка лишних пробелов и переносов
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        
-        if not text:
-            return "⚠️ Не удалось извлечь текст со страницы"
-        
-        # Ограничение длины
-        if len(text) > 30000:
-            text = text[:30000] + "\n\n... [контент обрезан]"
-        
-        return text
-        
-    except requests.exceptions.Timeout:
-        return "❌ Таймаут при загрузке URL. Проверьте доступность сайта."
-    except requests.exceptions.RequestException as e:
-        return f"❌ Ошибка сети: {str(e)}"
-    except Exception as e:
-        return f"❌ Неожиданная ошибка: {str(e)}"
-
-def create_docx(text: str, title: str) -> io.BytesIO:
-    """
-    Создание DOCX документа из текста с форматированием
-    """
-    try:
-        doc = Document()
-        
-        # Заголовок
-        title_para = doc.add_heading(title, 0)
-        title_para.alignment = 1  # По центру
-        
-        # Дата
-        from datetime import datetime
-        date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-        doc.add_paragraph(f"Дата создания: {date_str}").italic = True
-        
-        # Дисклеймер
-        disclaimer_para = doc.add_paragraph(DISCLAIMER_TEXT)
-        disclaimer_para.italic = True
-        for run in disclaimer_para.runs:
-            run.font.color.rgb = 0xFF0000  # Красный цвет
-        
-        doc.add_paragraph().add_run().add_break()  # Разделитель
-        
-        # Обработка текста
-        lines = text.split('\n')
-        table_data = []
-        in_table = False
-        
-        for line in lines:
-            line = line.rstrip()
-            
-            # Детекция таблицы Markdown
-            if '|' in line and not re.match(r'^[\|\s\-:]+$', line.strip()):
-                cells = [cell.strip() for cell in line.split('|') if cell.strip()]
-                if cells:
-                    table_data.append(cells)
-                    in_table = True
-                continue
-            
-            # Если собрана таблица, вставляем её
-            if in_table and table_data and (not line.strip() or '|' not in line):
-                if len(table_data) > 1:  # Минимум 2 строки для таблицы
-                    # Определяем количество колонок
-                    num_cols = max(len(row) for row in table_data)
-                    table = doc.add_table(rows=len(table_data), cols=num_cols)
-                    table.style = 'Table Grid'
-                    
-                    # Заполняем таблицу
-                    for i, row in enumerate(table_data):
-                        for j, cell_text in enumerate(row):
-                            if j < num_cols:
-                                cell = table.cell(i, j)
-                                cell.text = cell_text
-                                # Центрируем заголовки
-                                if i == 0:
-                                    for paragraph in cell.paragraphs:
-                                        paragraph.alignment = 1
-                
-                table_data = []
-                in_table = False
-                doc.add_paragraph()  # Отступ после таблицы
-            
-            # Обработка обычного текста
-            if line.strip() and not in_table:
-                # Убираем Markdown разметку
-                clean_line = re.sub(r'^[#\*\-\+]+|\*\*|\*|__|_|~~', '', line).strip()
-                
-                if line.startswith('## '):
-                    doc.add_heading(clean_line, 2)
-                elif line.startswith('# '):
-                    doc.add_heading(clean_line, 1)
-                elif line.startswith('### '):
-                    doc.add_heading(clean_line, 3)
-                elif line.startswith('- ') or line.startswith('* ') or line.startswith('+ '):
-                    doc.add_paragraph(clean_line, style='List Bullet')
-                elif re.match(r'^\d+\.', line):
-                    doc.add_paragraph(clean_line, style='List Number')
                 else:
-                    para = doc.add_paragraph(clean_line)
+                    error_msg = response.json().get('error', {}).get('message', 'Unknown')
+                    logger.error(f"Ошибка {model}: {response.status_code} - {error_msg}")
+                    break
                     
-                    # Выделение ключевых фраз
-                    if any(keyword in line for keyword in ['риск', 'опасность', 'проблема', '⚠️', '🔴']):
-                        for run in para.runs:
-                            run.bold = True
-                            run.font.color.rgb = 0xFF0000
-                    elif any(keyword in line for keyword in ['рекомендация', 'совет', 'решение', '✅', '💡']):
-                        for run in para.runs:
-                            run.font.color.rgb = 0x008000
+            except requests.exceptions.Timeout:
+                logger.warning(f"Таймаут {model}, попытка {retry+1}")
+                time.sleep(2 ** retry)  # Exponential backoff
+                continue
+            except Exception as e:
+                logger.error(f"Ошибка {model}: {str(e)}")
+                break
         
-        # Сохранение в буфер
-        buf = io.BytesIO()
-        doc.save(buf)
-        buf.seek(0)
-        
-        logger.info(f"DOCX создан успешно: {title}, размер: {len(buf.getvalue())} байт")
-        return buf
-        
-    except Exception as e:
-        logger.error(f"Ошибка создания DOCX: {str(e)}")
-        # Возвращаем простой текстовый файл в случае ошибки
-        buf = io.BytesIO()
-        buf.write(f"Ошибка создания документа: {str(e)}\n\n{text}".encode('utf-8'))
-        buf.seek(0)
-        return buf
+        # Если модель не сработала, пробуем следующую по приоритету
+        logger.info(f"Переход к следующей модели после {model}")
+        continue
+    
+    return None, "⚠️ Все модели недоступны. Проверьте лимиты и попробуйте позже."
 
-# -------------------
-# 5. Боковая панель
-# -------------------
+# ==================== ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ДОКУМЕНТАМИ ====================
+@st.cache_data(show_spinner=False, max_entries=100, ttl=1800)
+def extract_text_cached(file_bytes, filename):
+    """Кэшированное извлечение текста"""
+    try:
+        if filename.lower().endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(file_bytes))
+            return " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
+        elif filename.lower().endswith(".docx"):
+            doc = Document(io.BytesIO(file_bytes))
+            return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        return ""
+    except:
+        return ""
+
+# ==================== ОБНОВЛЕННЫЙ ИНТЕРФЕЙС ====================
+# Боковая панель с информацией о лимитах
 with st.sidebar:
-    st.markdown("### ⚙️ Конфигурация анализа")
+    st.header("⚙️ Конфигурация")
     
-    role = st.radio(
-        "👤 Анализ для:",
-        ["Предприниматель", "Юрист", "Физическое лицо", "Корпоративный клиент"],
-        help="Настройка рекомендаций под вашу роль"
-    )
+    # Информация о Free Tier
+    with st.expander("📊 Лимиты Free Tier", expanded=True):
+        st.markdown(f"""
+        **Доступные модели:**
+        - Gemini 2.5 Flash-Lite (приоритет 1)
+        - Gemini 2.5 Flash (приоритет 2)  
+        - Gemini 2.0 Flash-Lite (приоритет 3)
+        
+        **Лимиты:**
+        - RPM: 15/мин (Flash-Lite), 10/мин (Flash)
+        - TPM: 250,000 токенов
+        - RPD: ~1000 запросов/день
+        
+        **Использовано сегодня:** {limit_manager.daily_requests}/1000
+        """)
+        
+        if limit_manager.daily_requests > 800:
+            st.error("⚠️ Достигается дневной лимит!")
+        elif limit_manager.daily_requests > 500:
+            st.warning("ℹ️ Использовано более 50% лимита")
     
-    loc = st.selectbox(
-        "🌍 Юрисдикция:",
-        ["Российская Федерация", "Казахстан", "Узбекистан", "Беларусь", "Международное право"],
-        index=0
-    )
+    # Настройки
+    role = st.radio("Анализ для:", ["Предприниматель", "Юрист", "Физическое лицо"])
+    loc = st.selectbox("Юрисдикция:", ["РФ", "Казахстан", "Узбекистан", "Международная"])
     
-    detail = st.select_slider(
-        "📊 Уровень детализации:",
-        options=["Краткий обзор", "Стандартный", "Детальный анализ", "Максимальный"],
-        value="Стандартный",
-        help="Влияет на объем и глубину анализа"
-    )
-    
-    st.divider()
-    
-    st.markdown("### 🎯 Дополнительные параметры")
-    
-    include_recommendations = st.checkbox("Включить рекомендации", value=True)
-    include_alternatives = st.checkbox("Показать альтернативные формулировки", value=False)
-    
-    st.divider()
-    
-    # Кэш и сброс
-    col_cache1, col_cache2 = st.columns(2)
-    with col_cache1:
-        if st.button("🗑️ Очистить кэш", use_container_width=True):
-            st.cache_data.clear()
-            st.success("Кэш очищен!")
-            time.sleep(1)
-            st.rerun()
-    
-    with col_cache2:
-        if st.button("🔄 Сбросить всё", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.success("Все данные сброшены!")
-            time.sleep(1)
-            st.rerun()
+    # Оптимизация запросов
+    st.subheader("Оптимизация")
+    use_cache = st.checkbox("Использовать кэш", value=True, 
+                           help="Кэширует результаты на 1 час для экономии запросов")
+    optimize_text = st.checkbox("Сокращать длинные тексты", value=True,
+                               help="Автоматически сокращает документы >30K символов")
     
     st.divider()
     
-    # Дисклеймер
-    with st.expander("⚠️ Важная информация", expanded=True):
-        st.markdown(f'<div class="disclaimer">{DISCLAIMER_TEXT}</div>', unsafe_allow_html=True)
-    
-    # Информация о системе
-    st.markdown("---")
-    st.markdown("**LegalAI Enterprise Pro v2.0**")
-    st.caption("Анализ документов с использованием Google Gemini AI")
+    if st.button("🗑️ Очистить кэш", use_container_width=True):
+        st.cache_data.clear()
+        st.success("Кэш очищен!")
+        time.sleep(1)
+        st.rerun()
 
-# -------------------
-# 6. Основной интерфейс
-# -------------------
-st.markdown('<div class="main-header">⚖️ LegalAI Enterprise Pro</div>', unsafe_allow_html=True)
-
-# Инициализация сессионных переменных
-if 'audit_result' not in st.session_state:
-    st.session_state.audit_result = None
-if 'comparison_result' not in st.session_state:
-    st.session_state.comparison_result = None
+# ==================== ГЛАВНЫЙ ИНТЕРФЕЙС ====================
+st.title("⚖️ LegalAI Enterprise Pro")
+st.markdown('<div class="limit-warning">⚠️ Работает в режиме Google AI Studio Free Tier. Строгие лимиты: ~1000 запросов/день</div>', unsafe_allow_html=True)
 
 # Вкладки
-tab1, tab2, tab3 = st.tabs(["🚀 УМНЫЙ АУДИТ ДОКУМЕНТОВ", "🔍 СРАВНЕНИЕ ВЕРСИЙ", "📋 ГЕНЕРАТОР ДОКУМЕНТОВ"])
+tab1, tab2, tab3 = st.tabs(["🚀 Анализ", "🔍 Сравнение", "📋 Генерация"])
 
-# -------------------
-# ВКЛАДКА 1: Умный аудит
-# -------------------
 with tab1:
-    st.markdown("### Анализ рисков и юридической корректности документов")
-    
-    col1, col2 = st.columns([1, 1.2], gap="large")
+    col1, col2 = st.columns([1, 1.2])
     
     with col1:
-        st.markdown("#### 📄 Параметры анализа")
+        st.subheader("Загрузка документа")
         
-        # Выбор типа документа
-        doc_type = st.selectbox(
-            "Тип документа:",
-            [
-                "Договор оказания услуг",
-                "Договор поставки",
-                "Договор аренды",
-                "Соглашение о конфиденциальности (NDA)",
-                "Трудовой договор",
-                "Договор подряда",
-                "Лицензионное соглашение",
-                "Договор купли-продажи",
-                "Агентский договор",
-                "Другое"
-            ],
-            index=0,
-            help="Выберите наиболее подходящий тип документа для более точного анализа"
-        )
+        # Выбор типа ввода
+        input_type = st.radio("Источник:", ["Файл", "Текст", "URL"], horizontal=True)
         
-        # Способ ввода
-        input_method = st.radio(
-            "Способ ввода:",
-            ["Загрузка файла", "Вставка текста", "URL веб-страницы"],
-            horizontal=True,
-            help="Выберите способ загрузки документа для анализа"
-        )
+        input_data, is_image = None, False
         
-        input_data = None
-        is_image_file = False
-        
-        # Обработка разных способов ввода
-        if input_method == "Загрузка файла":
-            uploaded_file = st.file_uploader(
-                "Загрузите документ (PDF, DOCX, TXT) или изображение (JPG, PNG):",
-                type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
-                help="Максимальный размер файла: 50MB"
-            )
-            
-            if uploaded_file:
-                # Проверка размера файла
-                if uploaded_file.size > 50 * 1024 * 1024:  # 50MB
-                    st.error("❌ Файл слишком большой. Максимальный размер: 50MB")
+        if input_type == "Файл":
+            file = st.file_uploader("Загрузите документ", type=["pdf", "docx", "txt", "png", "jpg"])
+            if file:
+                if file.type.startswith("image"):
+                    input_data, is_image = file.getvalue(), True
+                    st.image(file, width=300)
                 else:
-                    # Определяем тип файла
-                    if uploaded_file.type.startswith("image"):
-                        st.image(uploaded_file, caption="Загруженное изображение", use_column_width=True)
-                        input_data = uploaded_file.getvalue()
-                        is_image_file = True
-                        st.success(f"✅ Изображение загружено: {uploaded_file.name}")
-                    else:
-                        # Извлекаем текст из документа
-                        with st.spinner("Извлекаю текст из документа..."):
-                            input_data = extract_text(uploaded_file.getvalue(), uploaded_file.name)
-                        
-                        if input_data.startswith("❌") or input_data.startswith("⚠️"):
-                            st.error(input_data)
-                        else:
-                            st.success(f"✅ Текст извлечен ({len(input_data)} символов)")
-                            with st.expander("📝 Предпросмотр текста"):
-                                st.text_area("Извлеченный текст:", input_data[:2000] + ("..." if len(input_data) > 2000 else ""), height=200)
+                    with st.spinner("Извлекаю текст..."):
+                        input_data = extract_text_cached(file.getvalue(), file.name)
+                        st.info(f"Извлечено: {len(input_data)} символов")
         
-        elif input_method == "Вставка текста":
-            input_data = st.text_area(
-                "Вставьте текст документа:",
-                height=300,
-                placeholder="Вставьте сюда текст договора или другого документа для анализа...",
-                help="Вы можете скопировать текст из любого документа и вставить его здесь"
-            )
-            
+        elif input_type == "Текст":
+            input_data = st.text_area("Введите текст:", height=200)
             if input_data:
-                st.info(f"📝 Длина текста: {len(input_data)} символов")
+                st.info(f"Длина: {len(input_data)} символов")
         
-        elif input_method == "URL веб-страницы":
-            url_input = st.text_input(
-                "Введите URL документа:",
-                placeholder="https://example.com/document.html",
-                help="Введите корректный URL веб-страницы, содержащей текст документа"
-            )
-            
-            if url_input:
-                with st.spinner("Загружаю и обрабатываю веб-страницу..."):
-                    input_data = fetch_url_content(url_input)
-                
-                if input_data.startswith("❌") or input_data.startswith("⚠️"):
-                    st.error(input_data)
-                else:
-                    st.success(f"✅ Контент загружен ({len(input_data)} символов)")
-                    with st.expander("📝 Предпросмотр контента"):
-                        st.text_area("Извлеченный текст:", input_data[:2000] + ("..." if len(input_data) > 2000 else ""), height=200)
+        else:  # URL
+            url = st.text_input("URL документа:")
+            if url:
+                try:
+                    response = requests.get(url, timeout=10)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    input_data = soup.get_text()[:20000]  # Лимит
+                except:
+                    st.error("Ошибка загрузки URL")
         
-        # Кнопка запуска анализа
-        analyze_button = st.button(
-            "🚀 ЗАПУСТИТЬ АНАЛИЗ РИСКОВ",
-            type="primary",
-            disabled=not input_data or not API_KEY,
+        # Проверка лимитов перед активацией кнопки
+        daily_remaining = 1000 - limit_manager.daily_requests
+        can_make_request = daily_remaining > 0 and input_data
+        
+        if daily_remaining <= 50:
+            st.markdown(f'<div class="limit-critical">⚠️ Осталось {daily_remaining} запросов сегодня!</div>', unsafe_allow_html=True)
+        
+        analyze_btn = st.button(
+            "🚀 Запустить анализ", 
+            disabled=not can_make_request,
+            type="primary" if can_make_request else "secondary",
             use_container_width=True
         )
+        
+        if not can_make_request and daily_remaining <= 0:
+            st.error("Дневной лимит исчерпан. Попробуйте завтра.")
     
     with col2:
-        st.markdown("#### 📊 Результаты анализа")
+        st.subheader("Результаты")
         
-        if analyze_button and input_data:
-            with st.spinner("🤖 Анализирую документ..."):
-                # Создаем прогресс бар
-                progress_bar = st.progress(0)
-                
-                # Формируем промпт для анализа
-                prompt = f"""
-                Ты - опытный юрист-аналитик. Проведи экспертный анализ документа.
-                
-                КОНТЕКСТ:
-                - Роль пользователя: {role}
-                - Юрисдикция: {loc}
-                - Тип документа: {doc_type}
-                - Уровень детализации: {detail}
-                
-                ТРЕБОВАНИЯ К АНАЛИЗУ:
-                1. Определи LEGAL SCORE (оценка юридической корректности) от 0% до 100%
-                2. Выдели ключевые риски с пометкой 🔴
-                3. Укажи возможные финансовые потери с пометкой 💸
-                4. Отметь скрытые ловушки и неявные условия с пометкой ⚠️
-                5. Проверь соответствие законодательству {loc}
-                6. Проанализируй баланс сторон
-                7. Оцени clarity (ясность формулировок)
-                
-                {"8. Предложи рекомендации по улучшению" if include_recommendations else ""}
-                {"9. Приведи альтернативные формулировки критических пунктов" if include_alternatives else ""}
-                
-                ФОРМАТ ВЫВОДА:
-                ## 📊 LEGAL SCORE: X%
-                [Краткое резюме оценки]
-                
-                ## 🔴 КЛЮЧЕВЫЕ РИСКИ
-                - Риск 1: [описание, уровень опасности, последствия]
-                - Риск 2: [описание, уровень опасности, последствия]
-                
-                ## 💸 ФИНАНСОВЫЕ АСПЕКТЫ
-                - [Потенциальные убытки, штрафы, издержки]
-                
-                ## ⚠️ СКРЫТЫЕ ЛОВУШКИ
-                - [Проблемные формулировки, двусмысленности]
-                
-                {"## 💡 РЕКОМЕНДАЦИИ" if include_recommendations else ""}
-                {"- [Конкретные предложения по улучшению]" if include_recommendations else ""}
-                
-                {"## 🔄 АЛЬТЕРНАТИВНЫЕ ФОРМУЛИРОВКИ" if include_alternatives else ""}
-                {"| Пункт | Текущая формулировка | Рекомендуемая формулировка | Обоснование |" if include_alternatives else ""}
-                {"|---|---|---|---|" if include_alternatives else ""}
-                
-                Будь конкретным, цитируй проблемные места из документа.
-                """
-                
-                progress_bar.progress(30)
-                
-                # Вызов модели
-                analysis_result = call_gemini_safe(
-                    prompt, 
-                    input_data, 
-                    is_image_file,
-                    model_override="gemini-2.0-flash"
-                )
-                
-                progress_bar.progress(80)
-                
-                if analysis_result:
-                    st.session_state.audit_result = analysis_result
-                    progress_bar.progress(100)
-                    time.sleep(0.5)
-                    progress_bar.empty()
-                    
-                    st.success("✅ Анализ завершен!")
-                else:
-                    st.error("❌ Не удалось выполнить анализ. Попробуйте еще раз.")
-                    progress_bar.empty()
-        
-        # Отображение результатов анализа
-        if st.session_state.audit_result:
-            st.markdown('<div class="score-container"><h3>📊 РЕЗУЛЬТАТЫ АНАЛИЗА</h3></div>', unsafe_allow_html=True)
+        if analyze_btn and input_data:
+            # Создаем уникальный хеш для кэширования
+            prompt_text = f"Анализ для {role} в {loc}"
+            content_hash = hashlib.md5(f"{prompt_text}_{input_data[:1000]}".encode()).hexdigest()
             
-            # Разбиваем результат на части для форматированного отображения
-            result_lines = st.session_state.audit_result.split('\n')
-            
-            for line in result_lines:
-                line_stripped = line.strip()
-                
-                # Выделение оценки
-                if "LEGAL SCORE:" in line.upper() or "ОЦЕНКА:" in line.upper():
-                    st.markdown(f"### {line}")
-                    st.divider()
-                
-                # Карточки рисков
-                elif any(marker in line for marker in ["🔴", "💸", "⚠️", "💡", "🔄"]):
-                    st.markdown(f'<div class="risk-card">{line}</div>', unsafe_allow_html=True)
-                
-                # Обычный текст
-                elif line_stripped:
-                    st.markdown(line)
-            
-            # Кнопка скачивания
-            st.divider()
-            docx_file = create_docx(st.session_state.audit_result, f"Анализ документа: {doc_type}")
-            
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    label="📥 Скачать отчет (DOCX)",
-                    data=docx_file,
-                    file_name=f"Legal_Analysis_{doc_type}_{time.strftime('%Y%m%d_%H%M%S')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
-                )
-            
-            with col_dl2:
-                if st.button("📋 Копировать в буфер", use_container_width=True):
-                    st.session_state.clipboard = st.session_state.audit_result
-                    st.success("Текст скопирован в буфер обмена!")
-        
-        elif not analyze_button:
-            st.info("👈 Загрузите документ и нажмите кнопку для запуска анализа")
-            st.markdown("""
-            ### Что анализирует система:
-            - 📝 **Юридическую корректность** формулировок
-            - ⚖️ **Соответствие законодательству** выбранной юрисдикции
-            - 🔍 **Скрытые риски** и неявные условия
-            - 💰 **Финансовые аспекты** и потенциальные убытки
-            - ⚠️ **Ловушки** в договорной документации
-            - ✅ **Баланс интересов** сторон договора
-            """)
-
-# -------------------
-# ВКЛАДКА 2: Сравнение версий
-# -------------------
-with tab2:
-    st.markdown("### Сравнение разных версий документа")
-    st.info("Загрузите две версии одного документа для анализа изменений")
-    
-    col_a, col_b = st.columns(2, gap="large")
-    
-    with col_a:
-        st.markdown("#### 📄 Оригинальная версия")
-        file_a = st.file_uploader(
-            "Загрузите оригинальный документ",
-            type=["pdf", "docx", "txt"],
-            key="file_a"
-        )
-        
-        if file_a:
-            st.success(f"✅ Загружено: {file_a.name}")
-            text_a = extract_text(file_a.getvalue(), file_a.name)
-            if not text_a.startswith("❌"):
-                st.caption(f"Извлечено символов: {len(text_a)}")
-    
-    with col_b:
-        st.markdown("#### 📄 Редактированная версия")
-        file_b = st.file_uploader(
-            "Загрузите измененную версию",
-            type=["pdf", "docx", "txt"],
-            key="file_b"
-        )
-        
-        if file_b:
-            st.success(f"✅ Загружено: {file_b.name}")
-            text_b = extract_text(file_b.getvalue(), file_b.name)
-            if not text_b.startswith("❌"):
-                st.caption(f"Извлечено символов: {len(text_b)}")
-    
-    # Кнопка сравнения
-    compare_button = st.button(
-        "⚖️ СРАВНИТЬ ВЕРСИИ",
-        type="primary",
-        disabled=not (file_a and file_b) or not API_KEY,
-        use_container_width=True
-    )
-    
-    if compare_button and file_a and file_b:
-        with st.spinner("🔍 Сравниваю документы..."):
-            # Извлекаем тексты
-            text_a = extract_text(file_a.getvalue(), file_a.name)
-            text_b = extract_text(file_b.getvalue(), file_b.name)
-            
-            if text_a.startswith("❌") or text_b.startswith("❌"):
-                st.error("Ошибка при чтении файлов. Проверьте формат документов.")
+            # Проверяем кэш если включено
+            cache_key = f"analysis_{content_hash}"
+            if use_cache and cache_key in st.session_state:
+                result = st.session_state[cache_key]
+                st.markdown('<div class="cache-badge">Из кэша</div>', unsafe_allow_html=True)
             else:
-                # Промпт для сравнения
-                compare_prompt = f"""
-                Ты - юрист, специализирующийся на сравнении документов. Сравни две версии документа.
-                
-                ТРЕБОВАНИЯ:
-                1. Создай таблицу сравнения в формате Markdown
-                2. Для каждого значимого изменения укажи:
-                   - Тип изменения (добавлено/удалено/изменено)
-                   - Смысл изменения
-                   - Юридические последствия
-                   - Уровень риска (низкий/средний/высокий)
-                
-                3. Выдели критические изменения, влияющие на:
-                   - Права сторон
-                   - Обязательства
-                   - Ответственность
-                   - Финансовые условия
-                
-                4. В конце дай общую оценку:
-                   - Насколько изменения улучшили/ухудшили документ
-                   - Кому изменения выгодны
-                   - Рекомендации по принятию/отклонению изменений
-                
-                ФОРМАТ ТАБЛИЦЫ:
-                | Пункт | Было | Стало | Тип изменения | Риск | Комментарий |
-                |-------|------|-------|---------------|------|-------------|
-                
-                ДОКУМЕНТ А (ОРИГИНАЛ):
-                {text_a[:15000]}
-                
-                ДОКУМЕНТ Б (РЕДАКЦИЯ):
-                {text_b[:15000]}
-                """
-                
-                comparison_result = call_gemini_safe(compare_prompt, f"Сравнение {file_a.name} и {file_b.name}")
-                
-                if comparison_result:
-                    st.session_state.comparison_result = comparison_result
-                    st.success("✅ Сравнение завершено!")
-                else:
-                    st.error("❌ Не удалось сравнить документы")
-    
-    # Отображение результатов сравнения
-    if st.session_state.comparison_result:
-        st.markdown("### 📊 Результаты сравнения")
-        st.markdown(st.session_state.comparison_result)
-        
-        # Кнопка скачивания
-        docx_file = create_docx(
-            st.session_state.comparison_result, 
-            f"Сравнение документов: {file_a.name if 'file_a' in locals() else ''} vs {file_b.name if 'file_b' in locals() else ''}"
-        )
-        
-        st.download_button(
-            label="📥 Скачать отчет сравнения (DOCX)",
-            data=docx_file,
-            file_name=f"Document_Comparison_{time.strftime('%Y%m%d_%H%M%S')}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
-        )
-
-# -------------------
-# ВКЛАДКА 3: Генератор документов
-# -------------------
-with tab3:
-    st.markdown("### Генерация юридических документов")
-    
-    # Два режима генерации
-    mode = st.radio(
-        "Режим генерации:",
-        ["На основе анализа", "С нуля по описанию"],
-        horizontal=True
-    )
-    
-    if mode == "На основе анализа":
-        if st.session_state.audit_result:
-            st.info("Сгенерируйте документы на основе проведенного анализа")
-            
-            col_gen1, col_gen2, col_gen3 = st.columns(3)
-            
-            with col_gen1:
-                if st.button("📋 Протокол разногласий", use_container_width=True):
-                    with st.spinner("Генерирую протокол разногласий..."):
-                        prompt = """
-                        На основе предыдущего анализа создай Протокол разногласий.
-                        
-                        Требования:
-                        1. Формат - официальный документ
-                        2. Структура:
-                           - Шапка с реквизитами сторон
-                           - Таблица разногласий
-                           - Обоснования изменений
-                           - Порядок урегулирования
-                        
-                        3. Таблица должна содержать:
-                           | № п/п | Пункт договора | Редакция контрагента | Предлагаемая редакция | Обоснование |
-                           |-------|----------------|----------------------|-----------------------|-------------|
-                        
-                        4. Учитывай риски, выявленные в анализе
-                        5. Предложи юридически корректные формулировки
-                        6. Укажи сроки рассмотрения
-                        
-                        Будь конкретным и практичным.
-                        """
-                        
-                        protocol = call_gemini_safe(prompt, st.session_state.audit_result)
-                        if protocol:
-                            st.markdown(protocol)
-                            
-                            # Кнопка скачивания
-                            docx_file = create_docx(protocol, "Протокол разногласий")
-                            st.download_button(
-                                "📥 Скачать Протокол",
-                                data=docx_file,
-                                file_name="Protocol_of_Disagreements.docx",
-                                use_container_width=True
-                            )
-            
-            with col_gen2:
-                if st.button("✍️ Дополнительное соглашение", use_container_width=True):
-                    with st.spinner("Генерирую дополнительное соглашение..."):
-                        prompt = """
-                        На основе анализа создай проект Дополнительного соглашения.
-                        
-                        Требования:
-                        1. Официальная форма договора
-                        2. Включи:
-                           - Преамбулу
-                           - Предмет соглашения
-                           - Изменяемые условия
-                           - Порядок вступления в силу
-                           - Реквизиты сторон
-                        
-                        3. Конкретные формулировки изменений
-                        4. Ссылки на пункты оригинального договора
-                        5. Юридически корректный язык
-                        
-                        Сделай документ готовым к подписанию.
-                        """
-                        
-                        agreement = call_gemini_safe(prompt, st.session_state.audit_result)
-                        if agreement:
-                            st.markdown(agreement)
-                            
-                            docx_file = create_docx(agreement, "Дополнительное соглашение")
-                            st.download_button(
-                                "📥 Скачать Соглашение",
-                                data=docx_file,
-                                file_name="Additional_Agreement.docx",
-                                use_container_width=True
-                            )
-            
-            with col_gen3:
-                if st.button("📝 Правки для контрагента", use_container_width=True):
-                    with st.spinner("Готовлю правки..."):
-                        prompt = """
-                        На основе анализа подготовь письмо контрагенту с предложением правок.
-                        
-                        Требования:
-                        1. Деловой стиль переписки
-                        2. Вежливый, но настойчивый тон
-                        3. Конкретные предложения по изменению
-                        4. Обоснование каждой правки
-                        5. Сроки на рассмотрение
-                        6. Контакты для обсуждения
-                        
-                        Сделай письмо убедительным и профессиональным.
-                        """
-                        
-                        letter = call_gemini_safe(prompt, st.session_state.audit_result)
-                        if letter:
-                            st.markdown(letter)
-                            
-                            docx_file = create_docx(letter, "Письмо контрагенту")
-                            st.download_button(
-                                "📥 Скачать Письмо",
-                                data=docx_file,
-                                file_name="Letter_to_Counterparty.docx",
-                                use_container_width=True
-                            )
-        else:
-            st.warning("⚠️ Сначала выполните анализ документа на вкладке 'Умный аудит'")
-    
-    else:  # Режим "С нуля по описанию"
-        st.markdown("#### 📝 Описание документа")
-        
-        doc_description = st.text_area(
-            "Опишите, какой документ нужно создать:",
-            height=150,
-            placeholder="Например: 'Договор аренды офиса в Москве на 2 года с возможностью пролонгации. Арендодатель - юридическое лицо, арендатор - ИП. Гарантийный депозит 2 месяца. Ответственность за коммунальные платежи на арендаторе.'",
-            help="Чем подробнее описание, тем точнее будет сгенерирован документ"
-        )
-        
-        if doc_description:
-            # Дополнительные параметры
-            col_params1, col_params2 = st.columns(2)
-            
-            with col_params1:
-                doc_style = st.selectbox(
-                    "Стиль документа:",
-                    ["Формальный", "Стандартный", "Упрощенный", "Детализированный"]
-                )
-                
-                doc_party = st.selectbox(
-                    "Чья позиция:",
-                    ["Автора документа", "Принимающей стороны", "Нейтральная"]
-                )
-            
-            with col_params2:
-                include_comments = st.checkbox("Добавить комментарии к пунктам", value=True)
-                include_alternatives = st.checkbox("Включить альтернативные варианты", value=False)
-            
-            if st.button("🔄 СГЕНЕРИРОВАТЬ ДОКУМЕНТ", use_container_width=True):
-                with st.spinner("Создаю документ..."):
+                with st.spinner(f"Анализирую (осталось {daily_remaining-1} запросов)..."):
+                    # Оптимизация промпта для экономии токенов
                     prompt = f"""
-                    Ты - юрист, создающий документ с нуля.
-                    
-                    ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
-                    {doc_description}
-                    
-                    ТРЕБОВАНИЯ:
-                    1. Создай полноценный юридический документ
-                    2. Стиль: {doc_style}
-                    3. Позиция: {doc_party}
-                    4. Включи все необходимые разделы
-                    5. Учитывай законодательство {loc}
-                    6. Документ должен быть готов к использованию
-                    
-                    {"7. Добавь комментарии к сложным пунктам" if include_comments else ""}
-                    {"8. Предложи альтернативные формулировки для ключевых условий" if include_alternatives else ""}
-                    
-                    СТРУКТУРА ДОКУМЕНТА:
-                    - Преамбула (реквизиты сторон)
-                    - Предмет договора
-                    - Права и обязанности сторон
-                    - Сроки и условия
-                    - Оплата и расчеты
-                    - Ответственность сторон
-                    - Форс-мажор
-                    - Разрешение споров
-                    - Заключительные положения
-                    - Реквизиты и подписи
-                    
-                    Сделай документ профессиональным и юридически корректным.
+                    Роль: {role}. Страна: {loc}. 
+                    Выдели: 
+                    1. Главные риски (🔴)
+                    2. Финансовые аспекты (💸)  
+                    3. Проблемные пункты (⚠️)
+                    Кратко, по делу. MAX 500 слов.
                     """
                     
-                    generated_doc = call_gemini_safe(prompt, "")
+                    result, error = call_gemini_with_limits(
+                        content_hash, prompt, 
+                        input_data[:30000] if optimize_text and len(input_data) > 30000 else input_data,
+                        is_image
+                    )
                     
-                    if generated_doc:
-                        st.markdown("### 📄 Сгенерированный документ")
-                        st.markdown(generated_doc)
-                        
-                        # Определяем название документа из первого заголовка
-                        doc_title = "Сгенерированный документ"
-                        lines = generated_doc.split('\n')
-                        for line in lines:
-                            if line.startswith('# ') and len(line) > 2:
-                                doc_title = line[2:].strip()
-                                break
-                        
-                        # Кнопка скачивания
-                        docx_file = create_docx(generated_doc, doc_title)
-                        st.download_button(
-                            "📥 Скачать документ",
-                            data=docx_file,
-                            file_name=f"{doc_title.replace(' ', '_')}.docx",
-                            use_container_width=True
-                        )
+                    if error:
+                        st.error(error)
+                        result = None
+                    elif result and use_cache:
+                        st.session_state[cache_key] = result
+            
+            if result:
+                # Отображение результата
+                lines = result.split('\n')
+                for line in lines:
+                    if '🔴' in line or '💸' in line or '⚠️' in line:
+                        st.markdown(f'<div class="risk-card">{line}</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(line)
+                
+                # Кнопка скачивания
+                if st.button("📥 Сохранить отчет", use_container_width=True):
+                    doc = Document()
+                    doc.add_heading("Анализ документа", 0)
+                    doc.add_paragraph(result)
+                    bio = io.BytesIO()
+                    doc.save(bio)
+                    st.download_button(
+                        label="Скачать DOCX",
+                        data=bio.getvalue(),
+                        file_name="analysis.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+        
+        elif not analyze_btn:
+            st.info("Загрузите документ и нажмите кнопку для анализа")
+            st.markdown("""
+            **Оптимизация для Free Tier:**
+            - Кэширование результатов
+            - Автосокращение длинных текстов  
+            - Приоритизация моделей
+            - Лимит вывода: 2000 токенов
+            """)
 
-# -------------------
-# 7. Футер
-# -------------------
-st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns(3)
+with tab2:
+    st.subheader("Сравнение документов (оптимизировано)")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        file_a = st.file_uploader("Документ A", type=["pdf", "docx"], key="fa")
+    with col_b:
+        file_b = st.file_uploader("Документ B", type=["pdf", "docx"], key="fb")
+    
+    if st.button("⚖️ Сравнить", disabled=not (file_a and file_b)):
+        with st.spinner("Сравниваю..."):
+            # Используем кэшированное извлечение
+            text_a = extract_text_cached(file_a.getvalue(), file_a.name)[:15000]
+            text_b = extract_text_cached(file_b.getvalue(), file_b.name)[:15000]
+            
+            prompt = "Сравни два документа, выдели только ключевые различия в таблице. Кратко."
+            content = f"ДОК А:\n{text_a}\n\nДОК Б:\n{text_b}"
+            
+            content_hash = hashlib.md5(f"compare_{text_a[:500]}_{text_b[:500]}".encode()).hexdigest()
+            result, error = call_gemini_with_limits(content_hash, prompt, content)
+            
+            if result:
+                st.markdown(result)
 
-with footer_col1:
-    st.caption("© 2024 LegalAI Enterprise Pro")
-    st.caption("Версия 2.0.0")
+with tab3:
+    st.subheader("Генерация документов")
+    
+    if 'audit_result' in st.session_state:
+        st.info("Используется результат предыдущего анализа")
+    
+    task = st.text_area("Запрос для генерации:", 
+                       placeholder="Например: составь протокол разногласий на основе анализа",
+                       height=100)
+    
+    if st.button("📝 Сгенерировать", disabled=not task):
+        with st.spinner("Генерирую..."):
+            context = st.session_state.get('audit_result', '')
+            prompt = f"{task}. Будь кратким. MAX 300 слов."
+            
+            content_hash = hashlib.md5(f"generate_{task}_{context[:500]}".encode()).hexdigest()
+            result, error = call_gemini_with_limits(content_hash, prompt, context[:10000])
+            
+            if result:
+                st.markdown(result)
 
-with footer_col2:
-    st.caption("Powered by Google Gemini AI")
-    st.caption("Для образовательных целей")
+# ==================== ФУТЕР С ИНФОРМАЦИЕЙ О ЛИМИТАХ ====================
+st.divider()
+col_info1, col_info2, col_info3 = st.columns(3)
+with col_info1:
+    st.caption(f"📊 Запросов сегодня: {limit_manager.daily_requests}/1000")
+with col_info2:
+    st.caption("⚡ RPM: 15/мин (Flash-Lite)")
+with col_info3:
+    st.caption("🔑 Google AI Studio Free Tier")
 
-with footer_col3:
-    st.caption("🔒 Ваши данные обрабатываются безопасно")
-    st.caption("Поддержка: support@legalai.pro")
-
-# Скрыть Streamlit элементы по умолчанию
-hide_streamlit_style = """
-<style>
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-</style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+# Скрипт для автоматического сброса счетчика в 08:00 UTC
+if st.button("🔄 Обновить счетчик лимитов (тест)"):
+    limit_manager.daily_requests = 0
+    limit_manager.last_reset = datetime.utcnow()
+    st.success("Счетчик сброшен!")
+    time.sleep(1)
+    st.rerun()
